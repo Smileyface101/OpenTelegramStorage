@@ -152,16 +152,27 @@ class Upload(Base):
     mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     path: Mapped[str] = mapped_column(String(512), nullable=False)
     status: Mapped[UploadStatus] = mapped_column(Enum(UploadStatus), default=UploadStatus.ACTIVE, nullable=False)
+    # Bundle members: position in the archive and the running CRC-32 of the
+    # bytes received so far (persisted so a restart never loses it).
+    member_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    crc32: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class Bundle(Base):
-    """A set of uploads zipped server-side into one archive before transfer."""
+    """A folder or file selection streamed into one store-only zip. The member
+    list (manifest) fixes every byte offset of the archive up front, so the
+    archive is written straight into the File's part pipeline; it never exists
+    on disk as a whole."""
     __tablename__ = "bundles"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id", ondelete="SET NULL"), nullable=True)
+    file_id: Mapped[str | None] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    compress: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    compress: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # legacy, always False now
+    manifest: Mapped[str | None] = mapped_column(Text, nullable=True)     # JSON [{"path","size"}]
+    written: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)  # archive bytes emitted so far
+    completed_members: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

@@ -55,7 +55,7 @@ function TransferSection() {
   useEffect(() => { get('/api/admin/settings').then(setS) }, [])
   const save = async (e) => {
     e.preventDefault(); setMsg(''); setError('')
-    try { setS(await put('/api/admin/settings', { part_size_mb: Number(s.part_size_mb), max_retries: Number(s.max_retries), compress_archives: s.compress_archives, upload_connections: Number(s.upload_connections) })); setMsg('Saved') } catch (err) { setError(err.message) }
+    try { setS(await put('/api/admin/settings', { part_size_mb: Number(s.part_size_mb), max_retries: Number(s.max_retries), upload_connections: Number(s.upload_connections) })); setMsg('Saved') } catch (err) { setError(err.message) }
   }
   if (!s) return null
   return (
@@ -71,7 +71,6 @@ function TransferSection() {
         <div><label className="label">Parallel upload connections (1–16)</label>
           <input className="input" type="number" min="1" max="16" value={s.upload_connections} onChange={(e) => setS({ ...s, upload_connections: e.target.value })} />
           <p className="text-xs text-ink-400 mt-1">Files over 10 MB are pushed to Telegram over this many connections at once. 4 is a good default; 1 uses the classic single-connection uploader.</p></div>
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={s.compress_archives} onChange={(e) => setS({ ...s, compress_archives: e.target.checked })} /> Compress zip archives by default</label>
         <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
         <button className="btn-primary">Save</button>
       </form>

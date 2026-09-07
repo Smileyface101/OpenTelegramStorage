@@ -121,10 +121,10 @@ export default function Files() {
     catch (e) { if (!t.ctrl.signal.aborted) setError(`${file.name}: ${e.message}`) }
     finally { t.finish() }
   }
-  const runZip = async (items, name, compress, target = folderId) => {
+  const runZip = async (items, name, target = folderId) => {
     setModal(null)
     const t = track(`${name}.zip`, items.reduce((a, it) => a + it.file.size, 0))
-    try { await uploadBundle(items, { name, folderId: target, compress, signal: t.ctrl.signal, onProgress: t.onProgress }); await load() }
+    try { await uploadBundle(items, { name, folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus }); await load() }
     catch (e) { if (!t.ctrl.signal.aborted) setError(`${name}.zip: ${e.message}`) }
     finally { t.finish() }
   }
@@ -382,9 +382,9 @@ export default function Files() {
 
       {modal?.type === 'folder' && <NameModal title="New folder" onClose={() => setModal(null)} onSubmit={async (name) => { await post('/api/folders', { name, parent_id: folderId }); setModal(null); load() }} />}
       {modal?.type === 'rename' && <NameModal title="Rename" initial={modal.file.name} onClose={() => setModal(null)} onSubmit={async (name) => { await patch(`/api/files/${modal.file.id}`, { name }); setModal(null); load() }} />}
-      {modal?.type === 'zip' && <ZipModal items={modal.items} onClose={() => setModal(null)} onSubmit={(items, name, compress) => runZip(items, name, compress, modal.target)} />}
+      {modal?.type === 'zip' && <ZipModal items={modal.items} onClose={() => setModal(null)} onSubmit={(items, name) => runZip(items, name, modal.target)} />}
       {modal?.type === 'move' && <MoveModal tree={tree} items={modal.items} currentFolderId={folderId} onClose={() => setModal(null)} onMove={(target) => moveItems(modal.items, target)} />}
-      {modal?.type === 'folder-upload' && <FolderUploadModal items={modal.items} root={modal.root} onClose={() => setModal(null)} onZip={(items, name, compress) => runZip(items, name, compress, modal.target)} onTree={(items, root) => runTree(items, root, modal.target)} />}
+      {modal?.type === 'folder-upload' && <FolderUploadModal items={modal.items} root={modal.root} onClose={() => setModal(null)} onZip={(items, name) => runZip(items, name, modal.target)} onTree={(items, root) => runTree(items, root, modal.target)} />}
     </div>
   )
 }
@@ -482,14 +482,12 @@ function NameModal({ title, initial = '', onClose, onSubmit }) {
 
 function ZipModal({ items, onClose, onSubmit }) {
   const [name, setName] = useState(items.length === 1 ? items[0].file.name.replace(/\.[^.]+$/, '') : 'archive')
-  const [compress, setCompress] = useState(false)
   const total = items.reduce((a, it) => a + it.file.size, 0)
   return (
     <Modal title="Upload as zip" onClose={onClose}>
-      <form onSubmit={(e) => { e.preventDefault(); onSubmit(items, name.trim() || 'archive', compress) }} className="space-y-3">
-        <p className="text-sm text-ink-300">{items.length} file(s), {bytes(total)} total, will be zipped on the server and then sent to the channel as one file.</p>
+      <form onSubmit={(e) => { e.preventDefault(); onSubmit(items, name.trim() || 'archive') }} className="space-y-3">
+        <p className="text-sm text-ink-300">{items.length} file(s), {bytes(total)} total, streamed into one zip archive on the way to the channel. The archive is store-only (no compression), so it is as fast as a plain upload.</p>
         <div><label className="label">Archive name</label><div className="flex items-center gap-1"><input className="input" autoFocus value={name} onChange={(e) => setName(e.target.value)} /><span className="text-ink-400">.zip</span></div></div>
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={compress} onChange={(e) => setCompress(e.target.checked)} /> Compress (slower; pointless for media and already-compressed files)</label>
         <div className="flex justify-end gap-2"><button type="button" className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary">Start</button></div>
       </form>
     </Modal>
@@ -527,21 +525,17 @@ function MoveModal({ tree, items, currentFolderId, onClose, onMove }) {
 function FolderUploadModal({ items, root, onClose, onZip, onTree }) {
   const [mode, setMode] = useState('zip')
   const [name, setName] = useState(root)
-  const [compress, setCompress] = useState(false)
   const total = items.reduce((a, it) => a + it.file.size, 0)
-  const submit = (e) => { e.preventDefault(); if (mode === 'zip') onZip(items, name.trim() || root, compress); else onTree(items, root) }
+  const submit = (e) => { e.preventDefault(); if (mode === 'zip') onZip(items, name.trim() || root); else onTree(items, root) }
   return (
     <Modal title={`Upload folder "${root}"`} onClose={onClose}>
       <form onSubmit={submit} className="space-y-4">
         <p className="text-sm text-ink-300">{items.length} file(s), {bytes(total)} total, subfolders included.</p>
         <label className={`block rounded-lg border p-3 cursor-pointer ${mode === 'zip' ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
           <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={mode === 'zip'} onChange={() => setMode('zip')} /> One zip archive</div>
-          <p className="text-xs text-ink-400 mt-1">Folder structure is kept inside the archive. One entry in your file list, fewer channel messages, one download. Best for backups.</p>
+          <p className="text-xs text-ink-400 mt-1">Folder structure is kept inside the archive, which is streamed to the channel as it is built. One entry in your file list, one download. Best for backups.</p>
           {mode === 'zip' && (
-            <div className="mt-2 space-y-2">
-              <div className="flex items-center gap-1"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /><span className="text-ink-400">.zip</span></div>
-              <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={compress} onChange={(e) => setCompress(e.target.checked)} /> Compress (slower; pointless for media)</label>
-            </div>
+            <div className="mt-2 flex items-center gap-1"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /><span className="text-ink-400">.zip</span></div>
           )}
         </label>
         <label className={`block rounded-lg border p-3 cursor-pointer ${mode === 'tree' ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>

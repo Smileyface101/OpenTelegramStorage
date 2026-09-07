@@ -5,10 +5,10 @@ import { api, ApiError } from './api'
 
 const MAX_TRIES = 5
 
-export async function uploadFile(file, { folderId = null, bundleId = null, path = null, onProgress, onStatus, signal } = {}) {
+export async function uploadFile(file, { folderId = null, bundleId = null, path = null, memberIndex = null, onProgress, onStatus, signal } = {}) {
   const init = await api('/api/uploads', {
     method: 'POST', signal,
-    body: { name: file.name, size: file.size, mime_type: file.type || null, folder_id: folderId, bundle_id: bundleId, path },
+    body: { name: file.name, size: file.size, mime_type: file.type || null, folder_id: folderId, bundle_id: bundleId, path, member_index: memberIndex },
   })
   const chunkSize = init.chunk_size
   let offset = init.received || 0
@@ -41,15 +41,23 @@ export async function uploadFile(file, { folderId = null, bundleId = null, path 
   return api(`/api/uploads/${init.id}/complete`, { method: 'POST', signal })
 }
 
-// Upload several files into one server-side zip. `items` are {file, path}
-// where path is the relative path to keep inside the archive (may be null).
-export async function uploadBundle(items, { name, folderId = null, compress = null, onProgress, signal } = {}) {
-  const bundle = await api('/api/bundles', { method: 'POST', signal, body: { name, folder_id: folderId, compress } })
+// Upload several files into one archive. The member list goes first so the
+// server can fix the archive layout; members are then streamed in order and
+// the zip bytes flow straight into the part pipeline (never a whole file on
+// disk). `items` are {file, path}; path is the name inside the archive.
+export async function uploadBundle(items, { name, folderId = null, onProgress, onStatus, signal } = {}) {
+  const bundle = await api('/api/bundles', {
+    method: 'POST', signal,
+    body: { name, folder_id: folderId, members: items.map(({ file, path }) => ({ path: path || file.name, size: file.size })) },
+  })
   const total = items.reduce((a, it) => a + it.file.size, 0)
   let doneBefore = 0
   try {
-    for (const { file, path } of items) {
-      await uploadFile(file, { folderId, bundleId: bundle.id, path, signal, onProgress: (d) => onProgress?.(doneBefore + d, total) })
+    for (let i = 0; i < items.length; i++) {
+      const { file } = items[i]
+      const member = bundle.members[i]
+      await uploadFile(file, { folderId, bundleId: bundle.id, path: member.path, memberIndex: i, signal, onStatus,
+        onProgress: (d) => onProgress?.(doneBefore + d, total) })
       doneBefore += file.size
     }
     return api(`/api/bundles/${bundle.id}/complete`, { method: 'POST', signal })

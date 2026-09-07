@@ -15,9 +15,11 @@ from app import config, security, settings_store
 from app.db import get_db
 from app.models import Bundle, File, FilePart, FileStatus, Folder, Upload, UploadStatus, User
 from app.routers.common import file_out
+import json
+
 from app.schemas import BundleCreate, UploadInit
-from app.transfers import staging, worker as transfer_worker
-from app.transfers.io import build_archive, plan_parts
+from app.transfers import staging, worker as transfer_worker, zipstream
+from app.transfers.io import plan_parts
 
 router = APIRouter(prefix="/api", tags=["uploads"])
 logger = logging.getLogger(__name__)
@@ -94,10 +96,30 @@ async def init_upload(data: UploadInit, db: AsyncSession = Depends(get_db), user
     db.add(up)
     await db.flush()
     if data.bundle_id:
-        # Bundle members are zipped server-side later: whole file in staging.
-        _check_space(data.size)
-        up.path = str(config.STAGING_DIR / f"{up.id}.part")
-        open(up.path, "wb").close()
+        bundle = await db.get(Bundle, data.bundle_id)
+        layout = _layout(bundle)
+        idx = data.member_index
+        if idx is None or idx >= len(layout.entries):
+            raise HTTPException(400, "member_index is required for bundle uploads")
+        entry = layout.entries[idx]
+        rel = _safe_rel_path(data.path, name) or name
+        if entry.size != data.size or entry.path.rsplit(" (", 1)[0] not in (rel, rel.rsplit(".", 1)[0]) and entry.path != rel:
+            raise HTTPException(409, {"code": "manifest_mismatch", "expected": {"path": entry.path, "size": entry.size}})
+        if idx != bundle.completed_members:
+            # Members stream into one archive, so they must arrive in order.
+            existing = await db.scalar(select(Upload).where(Upload.bundle_id == bundle.id, Upload.member_index == idx))
+            if existing is not None:
+                await db.rollback()
+                return _upload_out(existing)  # resume
+            raise HTTPException(409, {"code": "out_of_order", "expected_index": bundle.completed_members})
+        existing = await db.scalar(select(Upload).where(Upload.bundle_id == bundle.id, Upload.member_index == idx))
+        if existing is not None:
+            await db.rollback()
+            return _upload_out(existing)
+        up.rel_path = entry.path
+        up.member_index = idx
+        up.path = ""
+        up.file_id = bundle.file_id
     else:
         # Streaming upload: the File and its parts exist from the first byte;
         # completed parts go to Telegram while the rest is still arriving, so
@@ -136,6 +158,8 @@ async def upload_chunk(upload_id: str, request: Request, db: AsyncSession = Depe
         offset = -1
     if offset != up.received:
         raise HTTPException(409, {"code": "offset_mismatch", "received": up.received})
+    if up.bundle_id is not None:
+        return await _member_chunk(request, db, user, up)
     if up.file_id is None:
         written = 0
         with open(up.path, "r+b") as fh:
@@ -179,7 +203,24 @@ async def complete_upload(upload_id: str, db: AsyncSession = Depends(get_db), us
         raise HTTPException(400, {"code": "incomplete", "received": up.received, "size": up.size})
     up.status = UploadStatus.COMPLETE
     if up.bundle_id:
+        bundle = await db.get(Bundle, up.bundle_id)
+        f = await _own_file(db, user, bundle.file_id)
+        parts = sorted(f.parts, key=lambda p: p.index)
+        layout = _layout(bundle)
+        entry = layout.entries[up.member_index]
+        if up.size == 0 and bundle.written == entry.lfh_offset:
+            # Empty member: no chunk ever arrived, so emit its header now.
+            await asyncio.to_thread(staging.write_range, f, parts, entry.lfh_offset, zipstream.local_header(layout, entry))
+            bundle.written = entry.data_offset
+        if bundle.written != entry.dd_offset:
+            raise HTTPException(409, "Archive stream position out of sync; cancel the bundle and retry")
+        completed = await asyncio.to_thread(staging.write_range, f, parts, entry.dd_offset,
+                                            zipstream.data_descriptor(entry, up.crc32))
+        bundle.written = entry.end
+        bundle.completed_members += 1
         await db.commit()
+        if completed:
+            transfer_worker.kick()
         return {"upload": _upload_out(up), "file": None}
     f = await _own_file(db, user, up.file_id)
     f.sha256 = staging.whole_digest(f.id)
@@ -215,65 +256,133 @@ async def cancel_upload(upload_id: str, db: AsyncSession = Depends(get_db), user
 
 
 # ---------------------------------------------------------------- bundles
+def _layout(bundle: Bundle) -> zipstream.Layout:
+    if not bundle.manifest:
+        raise HTTPException(409, "This bundle was created by an older version; cancel it and start again")
+    return zipstream.plan(json.loads(bundle.manifest), bundle.created_at)
+
+
+async def _own_bundle(db: AsyncSession, user: User, bundle_id: str) -> Bundle:
+    b = await db.get(Bundle, bundle_id)
+    if b is None or b.owner_id != user.id:
+        raise HTTPException(404, "Bundle not found")
+    return b
+
+
+async def _member_chunk(request: Request, db: AsyncSession, user: User, up: Upload) -> dict:
+    """Route a member's bytes through the archive stream into the part files."""
+    bundle = await _own_bundle(db, user, up.bundle_id)
+    f = await _own_file(db, user, bundle.file_id)
+    parts = sorted(f.parts, key=lambda p: p.index)
+    layout = _layout(bundle)
+    entry = layout.entries[up.member_index]
+    if up.member_index != bundle.completed_members:
+        raise HTTPException(409, {"code": "out_of_order", "expected_index": bundle.completed_members})
+    if staging.staged_waiting(parts) >= staging.MAX_STAGED_PARTS:
+        raise HTTPException(429, {"code": "backpressure", "retry_after": 2, "received": up.received},
+                            headers={"Retry-After": "2"})
+    completed: list = []
+    if up.received == 0 and bundle.written == entry.lfh_offset:
+        completed += await asyncio.to_thread(staging.write_range, f, parts, entry.lfh_offset,
+                                             zipstream.local_header(layout, entry))
+        bundle.written = entry.data_offset
+    pos = entry.data_offset + up.received
+    if bundle.written != pos:
+        raise HTTPException(409, "Archive stream position out of sync; cancel the bundle and retry")
+    crc = up.crc32
+    async for block in request.stream():
+        if pos + len(block) > entry.dd_offset:
+            raise HTTPException(400, "Chunk exceeds declared file size")
+        completed += await asyncio.to_thread(staging.write_range, f, parts, pos, block)
+        crc = zipstream.crc_update(crc, block)
+        pos += len(block)
+    up.received = pos - entry.data_offset
+    up.crc32 = crc
+    bundle.written = pos
+    await db.commit()
+    if completed:
+        transfer_worker.kick()
+    return _upload_out(up)
+
+
 @router.post("/bundles")
 async def create_bundle(data: BundleCreate, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
+    """Start a streamed archive. The member list fixes the archive layout, so
+    the File and its parts are created now and data flows to Telegram as it
+    arrives, exactly like a plain upload."""
     await _check_folder(db, user, data.folder_id)
     name = _safe_name(data.name)
     if not name.lower().endswith(".zip"):
         name += ".zip"
-    compress = data.compress if data.compress is not None else await settings_store.get_bool(db, "transfer.compress_archives")
-    b = Bundle(owner_id=user.id, folder_id=data.folder_id, name=name, compress=compress)
+    members = []
+    for m in data.members:
+        rel = _safe_rel_path(m.path, os.path.basename(m.path.replace("\\", "/")) or "file") or _safe_name(m.path)
+        members.append({"path": rel, "size": int(m.size)})
+    config.ensure_dirs()
+    b = Bundle(owner_id=user.id, folder_id=data.folder_id, name=name, compress=False,
+               manifest=json.dumps(members, separators=(",", ":")))
     db.add(b)
+    await db.flush()
+    layout = zipstream.plan(members, b.created_at)
+    part_size = await settings_store.part_size_bytes(db)
+    _check_space(min(layout.total, (staging.MAX_STAGED_PARTS + 1) * part_size))
+    f = File(owner_id=user.id, folder_id=data.folder_id, name=name, size=layout.total, mime_type="application/zip",
+             is_archive=True, part_size=part_size, status=FileStatus.RECEIVING)
+    db.add(f)
+    await db.flush()
+    for index, offset, length in plan_parts(layout.total, part_size):
+        db.add(FilePart(file_id=f.id, index=index, offset=offset, size=length))
+    b.file_id = f.id
+    staging.begin(f)
     await db.commit()
-    return {"id": b.id, "name": b.name, "compress": b.compress}
+    return {"id": b.id, "name": b.name, "file_id": f.id, "size": layout.total, "compress": False,
+            "members": [{"index": e.index, "path": e.path, "size": e.size} for e in layout.entries]}
 
 
 @router.post("/bundles/{bundle_id}/complete")
 async def complete_bundle(bundle_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
-    b = await db.get(Bundle, bundle_id)
-    if b is None or b.owner_id != user.id:
-        raise HTTPException(404, "Bundle not found")
-    ups = (await db.execute(select(Upload).where(Upload.bundle_id == b.id))).scalars().all()
-    if not ups:
-        raise HTTPException(400, "Bundle has no files")
-    if any(u.status != UploadStatus.COMPLETE for u in ups):
-        raise HTTPException(400, "All files must finish uploading first")
-    total = sum(u.size for u in ups)
-    _check_space(total)
-    out_path = str(config.STAGING_DIR / f"{b.id}.zip")
-    members = [(u.rel_path or u.name, u.path) for u in ups]
-    try:
-        size = await asyncio.to_thread(build_archive, out_path, members, b.compress)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("archive build failed")
-        raise HTTPException(500, f"Could not build archive: {e}")
+    b = await _own_bundle(db, user, bundle_id)
+    layout = _layout(b)
+    if b.completed_members != len(layout.entries):
+        raise HTTPException(400, {"code": "incomplete", "completed": b.completed_members, "total": len(layout.entries)})
+    if b.written != layout.cd_offset:
+        raise HTTPException(409, "Archive stream position out of sync; cancel the bundle and retry")
+    f = await _own_file(db, user, b.file_id)
+    parts = sorted(f.parts, key=lambda p: p.index)
+    ups = (await db.execute(select(Upload).where(Upload.bundle_id == b.id).order_by(Upload.member_index))).scalars().all()
+    crcs = [u.crc32 for u in ups]
+    await asyncio.to_thread(staging.write_range, f, parts, layout.cd_offset, zipstream.central_directory(layout, crcs))
+    f.sha256 = staging.whole_digest(f.id)
+    staging.forget(f.id)
+    if all(p.message_id is not None for p in f.parts):
+        f.status = FileStatus.READY
+        f.ready_at = datetime.utcnow()
+    else:
+        f.status = FileStatus.QUEUED
     for u in ups:
-        try:
-            os.remove(u.path)
-        except FileNotFoundError:
-            pass
         await db.delete(u)
-    part_size = await settings_store.part_size_bytes(db)
-    f = File(owner_id=user.id, folder_id=b.folder_id, name=b.name, size=size, mime_type="application/zip",
-             is_archive=True, part_size=part_size, status=FileStatus.QUEUED, staging_path=out_path)
-    db.add(f)
     await db.delete(b)
     await db.commit()
-    await db.refresh(f, attribute_names=["parts"])
     transfer_worker.kick()
     return {"file": file_out(f)}
 
 
 @router.delete("/bundles/{bundle_id}")
 async def cancel_bundle(bundle_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
-    b = await db.get(Bundle, bundle_id)
-    if b is None or b.owner_id != user.id:
-        raise HTTPException(404, "Bundle not found")
+    b = await _own_bundle(db, user, bundle_id)
     for u in (await db.execute(select(Upload).where(Upload.bundle_id == b.id))).scalars():
-        try:
-            os.remove(u.path)
-        except FileNotFoundError:
-            pass
+        if u.path:
+            try:
+                os.remove(u.path)
+            except FileNotFoundError:
+                pass
+        await db.delete(u)
+    if b.file_id:
+        from app.routers.files import _takedown
+        f = await _own_file(db, user, b.file_id)
+        staging.forget(f.id)
+        await _takedown(f)
+        await db.delete(f)
     await db.delete(b)
     await db.commit()
     return {"ok": True}

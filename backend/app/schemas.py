@@ -77,6 +77,7 @@ class UploadInit(BaseModel):
     folder_id: int | None = None
     bundle_id: str | None = None
     path: str | None = Field(default=None, max_length=1024)  # relative path inside a bundle
+    member_index: int | None = Field(default=None, ge=0)     # position in the bundle manifest
 
 
 class FolderEnsure(BaseModel):
@@ -85,10 +86,16 @@ class FolderEnsure(BaseModel):
     parent_id: int | None = None
 
 
+class BundleMember(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+    size: int = Field(ge=0)
+
+
 class BundleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     folder_id: int | None = None
-    compress: bool | None = None
+    compress: bool | None = None  # ignored: streaming archives are store-only
+    members: list[BundleMember] = Field(min_length=1, max_length=100000)
 
 
 class SettingsUpdate(BaseModel):

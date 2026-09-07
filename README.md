@@ -34,8 +34,10 @@ browser ──chunked, resumable──▶ part staging ──worker──▶ Tel
   parts, so a 60 GB file needs about 1.5 GB of disk, and the total time is the
   slower hop rather than the sum of both. Parts are hashed as they arrive.
 * **Split and zip.** Large files become `name.ext.001`, `name.ext.002`, … one
-  message each, joined again on download. "Upload as zip" packs a selection
-  into one archive server-side first (archives are still staged whole).
+  message each, joined again on download. "Upload as zip" and folder uploads
+  stream a store-only zip straight into the same pipeline: the archive layout
+  is fixed from the file list up front, so it never exists on disk as a whole
+  and there is no size limit beyond your channel.
 * **Downloads stream.** Parts are fetched from Telegram and joined on the fly,
   with HTTP Range support, so nothing is buffered on disk.
 * **Real delete.** Deleting a file deletes the channel messages, not just the
@@ -109,8 +111,7 @@ For frontend development run `npm run dev` (proxies `/api` to port 8000).
 | `OTS_LOG_LEVEL` | `INFO` | Python log level |
 
 Staging needs free disk space for about four parts (2 GB at the default part
-size) for plain uploads, and the full archive size for "upload as zip"; the
-upload is refused otherwise.
+size); the upload is refused otherwise.
 
 ## Roadmap
 

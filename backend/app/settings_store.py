@@ -65,7 +65,6 @@ async def public_settings(db: AsyncSession) -> dict:
         "part_size_mb": await get_int(db, "transfer.part_size_mb", config.DEFAULT_PART_SIZE_MB),
         "max_part_size_mb": config.MAX_PART_SIZE_MB,
         "max_retries": await get_int(db, "transfer.max_retries", config.MAX_UPLOAD_RETRIES),
-        "compress_archives": await get_bool(db, "transfer.compress_archives", False),
         "upload_connections": max(1, min(16, await get_int(db, "transfer.upload_connections", 4))),
     }
 

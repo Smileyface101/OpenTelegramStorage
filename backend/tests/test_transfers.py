@@ -107,22 +107,81 @@ async def test_retry_after_failures(api, admin, fake_manager):
     assert (await api.get(f"/api/files/{fid}")).json()["status"] == "ready"
 
 
+async def _upload_member(api, bundle, index, path, data, chunk=5000):
+    r = await api.post("/api/uploads", json={"name": path.split("/")[-1], "size": len(data), "bundle_id": bundle["id"],
+                                             "path": path, "member_index": index})
+    assert r.status_code == 200, r.text
+    up = r.json()
+    off = 0
+    while off < len(data):
+        r = await api.put(f"/api/uploads/{up['id']}/chunk", content=data[off:off + chunk], headers={"X-Chunk-Offset": str(off)})
+        if r.status_code == 429:
+            assert await transfer_worker.worker.process_one()
+            continue
+        assert r.status_code == 200, r.text
+        off = r.json()["received"]
+    r = await api.post(f"/api/uploads/{up['id']}/complete")
+    assert r.status_code == 200, r.text
+    return up
+
+
 async def test_bundle_zip(api, admin, fake_manager):
-    r = await api.post("/api/bundles", json={"name": "photos"})
+    members = {"1.txt": b"one", "2.txt": b"two" * 10, "empty.bin": b""}
+    r = await api.post("/api/bundles", json={"name": "photos", "members": [{"path": p, "size": len(d)} for p, d in members.items()]})
+    assert r.status_code == 200, r.text
     b = r.json()
-    assert b["name"] == "photos.zip"
-    await _upload(api, "1.txt", b"one", bundle_id=b["id"])
-    await _upload(api, "2.txt", b"two" * 10, bundle_id=b["id"])
+    assert b["name"] == "photos.zip" and b["size"] > sum(len(d) for d in members.values())
+    assert (await api.get(f"/api/files/{b['file_id']}")).json()["status"] == "receiving"
+    for i, (p, d) in enumerate(members.items()):
+        await _upload_member(api, b, i, p, d)
     r = await api.post(f"/api/bundles/{b['id']}/complete")
     assert r.status_code == 200, r.text
     f = r.json()["file"]
-    assert f["is_archive"] and f["name"] == "photos.zip"
+    assert f["is_archive"] and f["name"] == "photos.zip" and f["size"] == b["size"]
     await _drain(transfer_worker.worker)
     r = await api.get(f"/api/files/{f['id']}/download")
-    assert r.status_code == 200
+    assert r.status_code == 200 and len(r.content) == b["size"]
     with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-        assert sorted(zf.namelist()) == ["1.txt", "2.txt"]
+        assert zf.testzip() is None
+        assert zf.namelist() == list(members)
         assert zf.read("2.txt") == b"two" * 10
+    assert not list(config.STAGING_DIR.glob(f"{f['id']}.p*"))
+
+
+async def test_bundle_streams_into_parts_with_backpressure(api, admin, fake_manager):
+    """A multi-part archive is sent to Telegram while members are still arriving."""
+    await api.put("/api/admin/settings", json={"part_size_mb": 1})
+    members = {f"vid/{i}.bin": os.urandom(900_000) for i in range(6)}  # ~5.4 MB -> 6 parts
+    b = (await api.post("/api/bundles", json={"name": "trip", "members": [{"path": p, "size": len(d)} for p, d in members.items()]})).json()
+    for i, (p, d) in enumerate(members.items()):
+        await _upload_member(api, b, i, p, d, chunk=300_000)
+    mid = (await api.get(f"/api/files/{b['file_id']}")).json()
+    assert mid["status"] == "receiving" and mid["parts_uploaded"] >= 2
+    # Out-of-order / duplicate member is refused, resume of the same member is allowed.
+    r = await api.post("/api/uploads", json={"name": "x", "size": 1, "bundle_id": b["id"], "path": "x", "member_index": 0})
+    assert r.status_code == 409
+    f = (await api.post(f"/api/bundles/{b['id']}/complete")).json()["file"]
+    await _drain(transfer_worker.worker)
+    r = await api.get(f"/api/files/{f['id']}/download")
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert zf.testzip() is None
+        for p, d in members.items():
+            assert zf.read(p) == d
+    assert f["sha256"] == hashlib.sha256(r.content).hexdigest()
+
+
+async def test_cancel_bundle_removes_everything(api, admin, fake_manager):
+    await api.put("/api/admin/settings", json={"part_size_mb": 1})
+    b = (await api.post("/api/bundles", json={"name": "c", "members": [{"path": "a.bin", "size": 1_500_000}]})).json()
+    r = await api.post("/api/uploads", json={"name": "a.bin", "size": 1_500_000, "bundle_id": b["id"], "path": "a.bin", "member_index": 0})
+    up = r.json()
+    await api.put(f"/api/uploads/{up['id']}/chunk", content=os.urandom(1_200_000), headers={"X-Chunk-Offset": "0"})
+    assert await transfer_worker.worker.process_one()
+    assert len(fake_manager.messages) == 1
+    assert (await api.delete(f"/api/bundles/{b['id']}")).status_code == 200
+    assert fake_manager.deleted == [100]
+    assert (await api.get(f"/api/files/{b['file_id']}")).status_code == 404
+    assert not list(config.STAGING_DIR.glob(f"{b['file_id']}.p*"))
 
 
 async def test_folders_and_isolation(api, admin, fake_manager):
@@ -145,21 +204,18 @@ async def test_folders_and_isolation(api, admin, fake_manager):
 
 
 async def test_bundle_keeps_folder_structure(api, admin, fake_manager):
-    b = (await api.post("/api/bundles", json={"name": "trip"})).json()
-    r = await api.post("/api/uploads", json={"name": "a.jpg", "size": 3, "bundle_id": b["id"], "path": "trip/2024/a.jpg"})
-    up1 = r.json()
-    await api.put(f"/api/uploads/{up1['id']}/chunk", content=b"abc", headers={"X-Chunk-Offset": "0"})
-    await api.post(f"/api/uploads/{up1['id']}/complete")
-    # Path traversal attempts are neutralised, and the file name always wins.
-    r = await api.post("/api/uploads", json={"name": "b.txt", "size": 2, "bundle_id": b["id"], "path": "../../etc/x.txt"})
-    up2 = r.json()
-    await api.put(f"/api/uploads/{up2['id']}/chunk", content=b"hi", headers={"X-Chunk-Offset": "0"})
-    await api.post(f"/api/uploads/{up2['id']}/complete")
+    members = [{"path": "trip/2024/a.jpg", "size": 3}, {"path": "../../etc/x.txt", "size": 2}]
+    b = (await api.post("/api/bundles", json={"name": "trip", "members": members})).json()
+    # Path traversal attempts are neutralised at planning time.
+    assert [m["path"] for m in b["members"]] == ["trip/2024/a.jpg", "etc/x.txt"]
+    await _upload_member(api, b, 0, "trip/2024/a.jpg", b"abc")
+    await _upload_member(api, b, 1, "etc/x.txt", b"hi")
     f = (await api.post(f"/api/bundles/{b['id']}/complete")).json()["file"]
     await _drain(transfer_worker.worker)
     r = await api.get(f"/api/files/{f['id']}/download")
     with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-        assert sorted(zf.namelist()) == ["etc/b.txt", "trip/2024/a.jpg"]
+        assert zf.testzip() is None
+        assert sorted(zf.namelist()) == ["etc/x.txt", "trip/2024/a.jpg"]
 
 
 async def test_folder_ensure_is_idempotent_and_scoped(api, admin):
