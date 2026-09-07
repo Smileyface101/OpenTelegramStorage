@@ -103,3 +103,10 @@ class SettingsUpdate(BaseModel):
     max_retries: int | None = Field(default=None, ge=0, le=20)
     compress_archives: bool | None = None
     upload_connections: int | None = Field(default=None, ge=1, le=16)
+
+
+class UploadComplete(BaseModel):
+    """Optional client-side digests: whole file plus one per part, computed by
+    the browser while it read the file."""
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    part_sha256: list[str] | None = None

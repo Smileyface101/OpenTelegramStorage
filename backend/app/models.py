@@ -96,6 +96,10 @@ class File(Base):
     retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False, index=True)
     ready_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Integrity: last full verification against the channel, and the first
+    # mismatch ever observed (on download or verify). NULL = fine so far.
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    integrity_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
     parts: Mapped[list["FilePart"]] = relationship(
         back_populates="file", cascade="all, delete-orphan", order_by="FilePart.index"

@@ -44,6 +44,8 @@ async def _clean_tables():
             await conn.execute(table.delete())
     security.login_throttle.reset()
     transfer_worker.progress.active.clear()
+    for leftover in config.STAGING_DIR.glob("*"):
+        leftover.unlink()
     yield
 
 

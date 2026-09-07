@@ -2,6 +2,7 @@
 // chunk is PUT with its offset; the server rejects out-of-order chunks with the
 // offset it actually has, so a retry or reload can pick up where it stopped.
 import { api, ApiError } from './api'
+import { createSHA256 } from 'hash-wasm'
 
 const MAX_TRIES = 5
 
@@ -13,8 +14,14 @@ export async function uploadFile(file, { folderId = null, bundleId = null, path 
   const chunkSize = init.chunk_size
   let offset = init.received || 0
   let tries = 0
+  // Hash while we read: whole file plus one digest per server part, so the
+  // server can prove nothing was corrupted in transit and keep the whole-file
+  // digest even if it restarted mid-upload. Only for fresh plain uploads
+  // (a resumed upload has already sent bytes we cannot re-hash).
+  const hashing = !bundleId && offset === 0 && init.part_size ? await makeHasher(init.part_size, file.size) : null
   while (offset < file.size) {
     const blob = file.slice(offset, Math.min(offset + chunkSize, file.size))
+    if (hashing) await hashing.feed(offset, blob)
     try {
       const r = await api(`/api/uploads/${init.id}/chunk`, {
         method: 'PUT', body: blob, signal,
@@ -38,7 +45,37 @@ export async function uploadFile(file, { folderId = null, bundleId = null, path 
     }
   }
   if (file.size === 0) onProgress?.(0, 0)
-  return api(`/api/uploads/${init.id}/complete`, { method: 'POST', signal })
+  const digests = hashing ? await hashing.finish() : undefined
+  return api(`/api/uploads/${init.id}/complete`, { method: 'POST', signal, body: digests })
+}
+
+async function makeHasher(partSize, size) {
+  const whole = await createSHA256()
+  let part = await createSHA256()
+  const parts = []
+  let fed = 0
+  let partStart = 0
+  const fedChunks = new Set()
+  return {
+    async feed(offset, blob) {
+      if (offset !== fed || fedChunks.has(offset)) return  // retries re-send the same bytes; hash once
+      fedChunks.add(offset)
+      const buf = new Uint8Array(await blob.arrayBuffer())
+      let pos = 0
+      while (pos < buf.length) {
+        const room = partStart + partSize - (fed + pos)
+        const slice = buf.subarray(pos, pos + Math.min(room, buf.length - pos))
+        whole.update(slice); part.update(slice)
+        pos += slice.length
+        if (fed + pos === partStart + partSize) { parts.push(part.digest('hex')); part = await createSHA256(); partStart += partSize }
+      }
+      fed += buf.length
+    },
+    async finish() {
+      if (size === 0 || fed > partStart) parts.push(part.digest('hex'))
+      return { sha256: whole.digest('hex'), part_sha256: parts }
+    },
+  }
 }
 
 // Upload several files into one archive. The member list goes first so the

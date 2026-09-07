@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import {
   Folder, FolderOpen, FolderPlus, FolderUp, Upload, Download, Trash2, Pencil, Archive, RefreshCw, ChevronRight, ChevronDown,
-  Search, FolderInput, ArrowUp, ArrowDown, X, Home, CornerLeftUp, Image, Film, Music, FileText, FileArchive, File as FileIcon, HardDrive, Plus,
+  Search, FolderInput, ArrowUp, ArrowDown, X, Home, CornerLeftUp, Image, Film, Music, FileText, FileArchive, File as FileIcon, HardDrive, ShieldCheck, ShieldAlert, ShieldQuestion,
 } from 'lucide-react'
 import { get, post, del, patch } from '../lib/api'
 import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, itemsFromDirectoryPicker, supportsDirectoryPicker, rootFolderName } from '../lib/uploader'
@@ -214,6 +214,9 @@ export default function Files() {
     try { await del(`/api/folders/${d.id}`); await load() } catch (e) { setError(e.message) }
   }
   const retry = async (f) => { try { await post(`/api/files/${f.id}/retry`); await load() } catch (e) { setError(e.message) } }
+  const verify = async (f) => { try { await post(`/api/files/${f.id}/verify`); await load() } catch (e) { setError(e.message) } }
+  const verifying = data?.files.some((f) => f.verifying)
+  useEffect(() => { if (!verifying) return; const t = setInterval(load, 1500); return () => clearInterval(t) }, [verifying, load])
 
   const crumbs = data?.breadcrumbs || []
   const currentName = crumbs.length ? crumbs[crumbs.length - 1].name : 'All files'
@@ -344,7 +347,9 @@ export default function Files() {
                         <td className="p-3">
                           <div className="flex items-center gap-2 min-w-0">{f.is_archive ? <FileArchive size={18} className="text-amber-300 shrink-0" /> : fileIcon(f.name)}
                             <span className="truncate">{f.name}</span>
-                            {f.parts_total > 1 && <span className="text-xs text-ink-400 shrink-0">{f.parts_total} parts</span>}</div>
+                            {f.parts_total > 1 && <span className="text-xs text-ink-400 shrink-0">{f.parts_total} parts</span>}
+                            <Integrity f={f} /></div>
+                          {f.integrity_error && <div className="text-xs text-red-300 mt-1 truncate">Integrity: {f.integrity_error}</div>}
                           {f.status !== 'ready' && f.status !== 'failed' && (
                             <div className="mt-1 max-w-xs">
                               <Progress value={pct(f.bytes_done, f.size)} />
@@ -359,6 +364,7 @@ export default function Files() {
                         <td className="p-3"><RowActions>
                           {f.status === 'ready' && <a href={`/api/files/${f.id}/download`} className="p-1 rounded hover:bg-ink-700 hover:text-white" title="Download"><Download size={16} /></a>}
                           {f.status === 'failed' && <IconBtn title="Retry" onClick={() => retry(f)}><RefreshCw size={16} /></IconBtn>}
+                          {f.status === 'ready' && <IconBtn title="Verify against the channel" onClick={() => verify(f)}><ShieldCheck size={16} /></IconBtn>}
                           <IconBtn title="Move" onClick={() => setModal({ type: 'move', items: { files: [f.id], folders: [] } })}><FolderInput size={16} /></IconBtn>
                           <IconBtn title="Rename" onClick={() => setModal({ type: 'rename', file: f })}><Pencil size={16} /></IconBtn>
                           <IconBtn title="Delete" danger onClick={() => removeFile(f)}><Trash2 size={16} /></IconBtn>
@@ -546,4 +552,12 @@ function FolderUploadModal({ items, root, onClose, onZip, onTree }) {
       </form>
     </Modal>
   )
+}
+
+function Integrity({ f }) {
+  if (f.verifying) return <span className="w-3.5 h-3.5 border-2 border-brand-400 border-t-transparent rounded-full animate-spin shrink-0" title="Verifying…" />
+  if (f.integrity_error) return <ShieldAlert size={14} className="text-red-400 shrink-0" title={f.integrity_error} />
+  if (f.verified_at) return <ShieldCheck size={14} className="text-emerald-400 shrink-0" title={`Verified ${when(f.verified_at)}`} />
+  if (f.status === 'ready' && f.sha256) return <ShieldQuestion size={14} className="text-ink-600 shrink-0" title="Hashed at upload, not yet verified against the channel" />
+  return null
 }

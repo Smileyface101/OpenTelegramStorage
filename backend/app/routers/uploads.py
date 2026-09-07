@@ -17,7 +17,7 @@ from app.models import Bundle, File, FilePart, FileStatus, Folder, Upload, Uploa
 from app.routers.common import file_out
 import json
 
-from app.schemas import BundleCreate, UploadInit
+from app.schemas import BundleCreate, UploadComplete, UploadInit
 from app.transfers import staging, worker as transfer_worker, zipstream
 from app.transfers.io import plan_parts
 
@@ -77,7 +77,7 @@ async def _check_folder(db: AsyncSession, user: User, folder_id: int | None) -> 
 def _upload_out(up: Upload) -> dict:
     return {"id": up.id, "name": up.name, "size": up.size, "received": up.received,
             "status": up.status.value, "chunk_size": config.UPLOAD_CHUNK_SIZE, "bundle_id": up.bundle_id,
-            "file_id": up.file_id}
+            "file_id": up.file_id, "part_size": getattr(up, "_part_size", None)}
 
 
 # ---------------------------------------------------------------- uploads
@@ -135,6 +135,7 @@ async def init_upload(data: UploadInit, db: AsyncSession = Depends(get_db), user
         up.file_id = f.id
         up.path = ""
         staging.begin(f)
+        up._part_size = part_size
     await db.commit()
     return _upload_out(up)
 
@@ -195,7 +196,8 @@ async def upload_chunk(upload_id: str, request: Request, db: AsyncSession = Depe
 
 
 @router.post("/uploads/{upload_id}/complete")
-async def complete_upload(upload_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
+async def complete_upload(upload_id: str, data: UploadComplete | None = None, db: AsyncSession = Depends(get_db),
+                          user: User = Depends(security.current_user)):
     up = await _own_upload(db, user, upload_id)
     if up.status != UploadStatus.ACTIVE:
         raise HTTPException(409, "Upload already completed")
@@ -223,8 +225,40 @@ async def complete_upload(upload_id: str, db: AsyncSession = Depends(get_db), us
             transfer_worker.kick()
         return {"upload": _upload_out(up), "file": None}
     f = await _own_file(db, user, up.file_id)
-    f.sha256 = staging.whole_digest(f.id)
+    server_digest = staging.whole_digest(f.id)
     staging.forget(f.id)
+    parts = sorted(f.parts, key=lambda p: p.index)
+    # Client-side digests (browser hashed the file while reading it). A
+    # mismatch means bytes were corrupted between browser and server: the
+    # file is failed and whatever already reached the channel is removed.
+    if data and (data.sha256 or data.part_sha256):
+        bad = None
+        if data.part_sha256 is not None:
+            if len(data.part_sha256) != len(parts):
+                bad = f"client sent {len(data.part_sha256)} part digests, file has {len(parts)} parts"
+            else:
+                for p, d in zip(parts, data.part_sha256):
+                    if p.sha256 and d != p.sha256:
+                        bad = f"part {p.index + 1} was corrupted in transit"
+                        break
+        if bad is None and data.sha256 and server_digest and data.sha256 != server_digest:
+            bad = "whole-file checksum mismatch between browser and server"
+        if bad:
+            from app.routers.files import _takedown
+            await _takedown(f)
+            for p in parts:
+                p.message_id = None
+                p.received = 0
+                p.sha256 = None
+                p.staging_path = None
+            f.status = FileStatus.FAILED
+            f.error = f"Upload rejected: {bad}. Please upload the file again."
+            await db.delete(up)
+            await db.commit()
+            raise HTTPException(422, {"code": "checksum_mismatch", "detail": bad})
+    # Whole digest: prefer what the server computed; after a restart mid-upload
+    # only the browser still knows it.
+    f.sha256 = server_digest or (data.sha256 if data else None)
     if all(p.message_id is not None for p in f.parts):
         f.status = FileStatus.READY
         f.ready_at = datetime.utcnow()

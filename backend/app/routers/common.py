@@ -1,6 +1,7 @@
 """Shared serializers."""
 from app.models import File, FilePart, Folder, User
 from app.transfers.worker import progress as _progress
+from app.transfers.verify import verifying as _verifying
 
 
 def user_out(u: User) -> dict:
@@ -27,4 +28,5 @@ def file_out(f: File, parts: list[FilePart] | None = None) -> dict:
         "part_size": f.part_size, "parts_total": len(parts), "parts_uploaded": uploaded,
         "bytes_done": min(done_bytes, f.size), "created_at": f.created_at, "ready_at": f.ready_at,
         "current_part": live,
+        "verified_at": f.verified_at, "integrity_error": f.integrity_error, "verifying": f.id in _verifying,
     }

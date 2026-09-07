@@ -40,6 +40,11 @@ browser ──chunked, resumable──▶ part staging ──worker──▶ Tel
   and there is no size limit beyond your channel.
 * **Downloads stream.** Parts are fetched from Telegram and joined on the fly,
   with HTTP Range support, so nothing is buffered on disk.
+* **Integrity end to end.** The browser hashes the file while reading it and
+  the server hashes every part as it arrives; a mismatch rejects the upload.
+  Each part is checked against its recorded SHA-256 as it streams out on
+  download, and "Verify" re-reads a file from the channel to prove it is
+  still intact. Downloads carry an `X-Checksum-SHA256` header.
 * **Real delete.** Deleting a file deletes the channel messages, not just the
   index row.
 * **Self-describing channel.** Every part carries a JSON caption with the file
@@ -115,7 +120,6 @@ size); the upload is refused otherwise.
 
 ## Roadmap
 
-- Integrity verification on download (per-part SHA-256 check).
 - Optional encryption of parts (AES-GCM) so Telegram never holds readable bytes.
 - Stale-upload cleanup and staging usage in Settings.
 - Status panel, TOTP two-factor login, expiring share links.

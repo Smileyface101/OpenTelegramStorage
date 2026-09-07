@@ -1,4 +1,6 @@
 """Folders, file index, delete (with channel takedown) and streamed download."""
+import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -16,7 +18,7 @@ from app.models import File, FileStatus, Folder, User
 from app.routers.common import file_out, folder_out
 from app.schemas import BulkMove, FolderCreate, FolderEnsure, Move, Rename
 from app.telegram.manager import TelegramNotConfigured, manager
-from app.transfers import worker as transfer_worker
+from app.transfers import verify as integrity, worker as transfer_worker
 
 router = APIRouter(prefix="/api", tags=["files"])
 logger = logging.getLogger(__name__)
@@ -325,6 +327,20 @@ def _parse_range(header: str | None, size: int) -> tuple[int, int] | None:
     return start, min(end, size - 1)
 
 
+@router.post("/files/{file_id}/verify")
+async def verify_file(file_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
+    """Re-read every part from the channel and compare checksums (background)."""
+    f = await _own_file(db, user, file_id)
+    if f.status != FileStatus.READY:
+        raise HTTPException(409, "Only files that are fully in the channel can be verified")
+    if not manager.ready():
+        raise HTTPException(503, "Telegram is not connected")
+    if f.id not in integrity.verifying:
+        asyncio.create_task(integrity.verify_file(manager, f.id))
+        await asyncio.sleep(0)
+    return {"ok": True, "verifying": True}
+
+
 @router.get("/files/{file_id}/download")
 async def download(file_id: str, request: Request, db: AsyncSession = Depends(get_db),
                    user: User = Depends(security.current_user)):
@@ -338,6 +354,8 @@ async def download(file_id: str, request: Request, db: AsyncSession = Depends(ge
     start, end = rng if rng else (0, max(f.size - 1, 0))
     length = (end - start + 1) if f.size else 0
 
+    file_id, file_name = f.id, f.name
+
     async def body():
         remaining = length
         for p in parts:
@@ -348,10 +366,20 @@ async def download(file_id: str, request: Request, db: AsyncSession = Depends(ge
                 continue
             from_off = max(start, p_start) - p_start
             take = min(end, p_end) - max(start, p_start) + 1
+            # A part that streams out in full is checked against its recorded
+            # digest; a mismatch aborts the response so the client never gets
+            # a silently corrupt file.
+            full = from_off == 0 and take == p.size and p.sha256
+            h = hashlib.sha256() if full else None
             doc = await manager.get_document(p.message_id)
             async for chunk in manager.iter_download(doc, from_off, take):
                 remaining -= len(chunk)
+                if h is not None:
+                    h.update(chunk)
                 yield chunk
+            if h is not None and h.hexdigest() != p.sha256:
+                await integrity.record_mismatch(file_id, f"part {p.index + 1}: checksum mismatch on download")
+                raise RuntimeError(f"Integrity failure: part {p.index + 1} of {file_name} does not match its checksum")
 
     headers = {
         "Accept-Ranges": "bytes",
@@ -359,6 +387,8 @@ async def download(file_id: str, request: Request, db: AsyncSession = Depends(ge
         "Content-Length": str(length),
         "X-Content-Type-Options": "nosniff",
     }
+    if f.sha256:
+        headers["X-Checksum-SHA256"] = f.sha256
     status = 200
     if rng:
         status = 206
