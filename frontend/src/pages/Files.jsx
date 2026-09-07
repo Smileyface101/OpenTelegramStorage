@@ -75,12 +75,28 @@ export default function Files() {
     e.dataTransfer.effectAllowed = 'move'
   }
   const isInternal = (e) => Array.from(e.dataTransfer.types || []).includes('application/x-ots-move')
-  const onTargetDragOver = (e, target) => { if (!isInternal(e)) return; e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; setDropTarget(target) }
-  const onTargetDrop = (e, targetFolderId) => {
-    if (!isInternal(e)) return
-    e.preventDefault(); e.stopPropagation(); setDropTarget(null)
-    const payload = internalDrag.current; internalDrag.current = null
-    if (payload) moveItems(payload, targetFolderId)
+  const isExternal = (e) => Array.from(e.dataTransfer.types || []).includes('Files')
+  const onTargetDragOver = (e, target) => {
+    if (!isInternal(e) && !isExternal(e)) return
+    e.preventDefault(); e.stopPropagation()
+    e.dataTransfer.dropEffect = isInternal(e) ? 'move' : 'copy'
+    setDropTarget(target); setDragging(false)
+  }
+  const onTargetDrop = async (e, targetFolderId) => {
+    if (isInternal(e)) {
+      e.preventDefault(); e.stopPropagation(); setDropTarget(null)
+      const payload = internalDrag.current; internalDrag.current = null
+      if (payload) moveItems(payload, targetFolderId)
+      return
+    }
+    if (!isExternal(e)) return
+    // Files dragged in from the desktop: upload straight into that folder.
+    e.preventDefault(); e.stopPropagation(); setDropTarget(null); setDragging(false)
+    try {
+      const { items, hadDirectory } = await itemsFromDataTransfer(e.dataTransfer)
+      if (hadDirectory) startFolder(items, targetFolderId)
+      else startUploads(items.map((it) => it.file), false, targetFolderId)
+    } catch (err) { setError(err.message) }
   }
   const onRowDragEnd = () => { internalDrag.current = null; setDropTarget(null) }
   const pending = data?.files.some((f) => f.status !== 'ready' && f.status !== 'failed')
@@ -90,15 +106,15 @@ export default function Files() {
     return () => clearInterval(t)
   }, [pending, load])
 
-  const startUploads = (files, asZip = false) => {
+  const startUploads = (files, asZip = false, target = folderId) => {
     if (!files.length) return
-    if (asZip) return setModal({ type: 'zip', items: files.map((file) => ({ file, path: file.name })) })
-    files.forEach((f) => runUpload(f))
+    if (asZip) return setModal({ type: 'zip', items: files.map((file) => ({ file, path: file.name })), target })
+    files.forEach((f) => runUpload(f, target))
   }
 
-  const startFolder = (items) => {
+  const startFolder = (items, target = folderId) => {
     if (!items.length) { setError('The selected folder contains no files (or the browser did not grant access to it).'); return }
-    setModal({ type: 'folder-upload', items, root: rootFolderName(items) || 'folder' })
+    setModal({ type: 'folder-upload', items, root: rootFolderName(items) || 'folder', target })
   }
 
   const onPickFolder = (e) => {
@@ -127,34 +143,34 @@ export default function Files() {
     return { ctrl, onProgress, finish }
   }
 
-  const runUpload = async (file) => {
+  const runUpload = async (file, target = folderId) => {
     const t = track(file.name, file.size)
     try {
-      await uploadFile(file, { folderId, signal: t.ctrl.signal, onProgress: t.onProgress })
+      await uploadFile(file, { folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress })
       await load()
     } catch (e) {
       if (!t.ctrl.signal.aborted) setError(`${file.name}: ${e.message}`)
     } finally { t.finish() }
   }
 
-  const runZip = async (items, name, compress) => {
+  const runZip = async (items, name, compress, target = folderId) => {
     setModal(null)
     const size = items.reduce((a, it) => a + it.file.size, 0)
     const t = track(`${name}.zip`, size)
     try {
-      await uploadBundle(items, { name, folderId, compress, signal: t.ctrl.signal, onProgress: t.onProgress })
+      await uploadBundle(items, { name, folderId: target, compress, signal: t.ctrl.signal, onProgress: t.onProgress })
       await load()
     } catch (e) {
       if (!t.ctrl.signal.aborted) setError(`${name}.zip: ${e.message}`)
     } finally { t.finish() }
   }
 
-  const runTree = async (items, root) => {
+  const runTree = async (items, root, target = folderId) => {
     setModal(null)
     const size = items.reduce((a, it) => a + it.file.size, 0)
     const t = track(`${root}/ (${items.length} files)`, size)
     try {
-      await uploadTree(items, { folderId, signal: t.ctrl.signal, onProgress: t.onProgress, onFileDone: load })
+      await uploadTree(items, { folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress, onFileDone: load })
       await load()
     } catch (e) {
       if (!t.ctrl.signal.aborted) setError(`${root}: ${e.message}`)
@@ -249,7 +265,7 @@ export default function Files() {
                   onDragOver={(e) => onTargetDragOver(e, d.id)} onDragLeave={() => setDropTarget(null)} onDrop={(e) => onTargetDrop(e, d.id)}
                   className={`border-t border-ink-800 hover:bg-ink-800/40 ${selected.folders.has(d.id) ? 'bg-brand-500/10' : ''} ${dropTarget === d.id ? 'bg-brand-500/20 ring-1 ring-inset ring-brand-500' : ''}`}>
                   <td className="p-3"><input type="checkbox" checked={selected.folders.has(d.id)} onChange={() => toggleSel('folders', d.id)} /></td>
-                  <td className="p-3"><Link to={`/files?folder=${d.id}`} className="flex items-center gap-2"><Folder size={16} className="text-amber-300" />{d.name}</Link></td>
+                  <td className="p-3"><Link to={`/files?folder=${d.id}`} className="flex items-center gap-2"><Folder size={16} className="text-amber-300" />{d.name}{dropTarget === d.id && <span className="text-xs text-brand-400 ml-2">drop here</span>}</Link></td>
                   <td className="hidden sm:table-cell" /><td className="hidden md:table-cell" /><td className="p-3 text-ink-400 hidden lg:table-cell">{when(d.created_at)}</td>
                   <td className="p-3">
                     <div className="flex justify-end gap-2 text-ink-400">
@@ -285,7 +301,7 @@ export default function Files() {
                 </tr>
               ))}
               {data.folders.length === 0 && data.files.length === 0 && (
-                <tr><td colSpan={6} className="p-10 text-center text-ink-400">Drop files or folders here, or use the buttons above. Files larger than the part size are split into parts automatically.</td></tr>
+                <tr><td colSpan={6} className="p-10 text-center text-ink-400">Drop files or folders here, or onto a folder row to upload into it. Files larger than the part size are split into parts automatically.</td></tr>
               )}
             </tbody>
           </table>
@@ -294,9 +310,9 @@ export default function Files() {
 
       {modal?.type === 'folder' && <NameModal title="New folder" onClose={() => setModal(null)} onSubmit={async (name) => { await post('/api/folders', { name, parent_id: folderId }); setModal(null); load() }} />}
       {modal?.type === 'rename' && <NameModal title="Rename" initial={modal.file.name} onClose={() => setModal(null)} onSubmit={async (name) => { await patch(`/api/files/${modal.file.id}`, { name }); setModal(null); load() }} />}
-      {modal?.type === 'zip' && <ZipModal items={modal.items} onClose={() => setModal(null)} onSubmit={runZip} />}
+      {modal?.type === 'zip' && <ZipModal items={modal.items} onClose={() => setModal(null)} onSubmit={(items, name, compress) => runZip(items, name, compress, modal.target)} />}
       {modal?.type === 'move' && <MoveModal items={modal.items} currentFolderId={folderId} onClose={() => setModal(null)} onMove={(target) => moveItems(modal.items, target)} />}
-      {modal?.type === 'folder-upload' && <FolderUploadModal items={modal.items} root={modal.root} onClose={() => setModal(null)} onZip={runZip} onTree={runTree} />}
+      {modal?.type === 'folder-upload' && <FolderUploadModal items={modal.items} root={modal.root} onClose={() => setModal(null)} onZip={(items, name, compress) => runZip(items, name, compress, modal.target)} onTree={(items, root) => runTree(items, root, modal.target)} />}
     </div>
   )
 }
