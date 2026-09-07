@@ -12,6 +12,10 @@ services:
       - OTS_DATA_DIR=/data
     volumes:
       - ots-data:/data
+      # Server-side import: anything under this host directory can be sent to
+      # the channel from Settings/Upload -> "Import from server" without going
+      # through a browser (read in place, never deleted). Read-only is enough.
+      #- /mnt/media:/import:ro
     # Uncomment to stage uploads on a specific disk instead of the named volume:
     #  - /mnt/big-disk/ots:/data
 

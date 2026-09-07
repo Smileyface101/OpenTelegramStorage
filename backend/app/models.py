@@ -92,6 +92,9 @@ class File(Base):
     part_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[FileStatus] = mapped_column(Enum(FileStatus), default=FileStatus.QUEUED, nullable=False, index=True)
     staging_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # True when staging_path points at a user's source file (server-side
+    # import): read in place, never deleted by the app.
+    keep_source: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     retries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False, index=True)

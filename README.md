@@ -45,6 +45,9 @@ browser ──chunked, resumable──▶ part staging ──worker──▶ Tel
   Each part is checked against its recorded SHA-256 as it streams out on
   download, and "Verify" re-reads a file from the channel to prove it is
   still intact. Downloads carry an `X-Checksum-SHA256` header.
+* **Import from the server.** Mount a directory at `/import` and send files
+  or whole folders from it straight to the channel: no browser, no copy, read
+  in place. Folders go in as a streamed zip or as a tree.
 * **Real delete.** Deleting a file deletes the channel messages, not just the
   index row.
 * **Self-describing channel.** Every part carries a JSON caption with the file
@@ -113,6 +116,7 @@ For frontend development run `npm run dev` (proxies `/api` to port 8000).
 | `OTS_COOKIE_SECURE` | auto | Force the Secure cookie flag on/off |
 | `OTS_TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front of the app |
 | `OTS_DEFAULT_PART_SIZE_MB` | `512` | Initial part size; change later in Settings |
+| `OTS_IMPORT_DIR` | `data/import` (`/import` in Docker) | Server-side import mount |
 | `OTS_LOG_LEVEL` | `INFO` | Python log level |
 
 Staging needs free disk space for about four parts (2 GB at the default part
@@ -121,6 +125,7 @@ size); the upload is refused otherwise.
 ## Roadmap
 
 - Optional encryption of parts (AES-GCM) so Telegram never holds readable bytes.
+- Parallel chunk uploads from the browser and resume across browser restarts.
 - Stale-upload cleanup and staging usage in Settings.
 - Status panel, TOTP two-factor login, expiring share links.
 - User-account (phone) login for 4 GB parts with Telegram Premium.

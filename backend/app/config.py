@@ -44,6 +44,10 @@ DEFAULT_PART_SIZE_MB = _env_int("OTS_DEFAULT_PART_SIZE_MB", 512)
 MAX_UPLOAD_RETRIES = 3
 STAGING_FREE_SPACE_MARGIN = 256 * 1024 * 1024
 
+# Server-side import: a directory (mount it into the container) whose files
+# can be sent to the channel directly, without a browser or a staging copy.
+IMPORT_DIR = Path(os.getenv("OTS_IMPORT_DIR", str(DATA_DIR / "import"))).resolve()
+
 # Where the built SPA lives (Docker copies it here).
 FRONTEND_DIST = Path(os.getenv("OTS_FRONTEND_DIST", str(Path(__file__).resolve().parents[2] / "frontend" / "dist")))
 

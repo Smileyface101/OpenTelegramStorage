@@ -287,7 +287,7 @@ async def _takedown(f: File) -> None:
             logger.warning("Telegram offline; could not delete messages %s for file %s", ids, f.id)
         except Exception:  # noqa: BLE001
             logger.exception("Failed deleting channel messages %s for file %s", ids, f.id)
-    if f.staging_path:
+    if f.staging_path and not f.keep_source:
         try:
             os.remove(f.staging_path)
         except FileNotFoundError:

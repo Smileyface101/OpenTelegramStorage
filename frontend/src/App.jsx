@@ -43,7 +43,7 @@ export default function App() {
       <Route path="/setup" element={<Setup setup={setup} user={user} onDone={async () => { await refresh(); navigate('/files') }} onAdminCreated={refresh} />} />
       <Route path="/login" element={user ? <Navigate to="/files" replace /> : <Login onAuth={onAuth} />} />
       <Route element={<Layout user={user} onLogout={onLogout} setup={setup} />}>
-        <Route path="/files" element={<Files />} />
+        <Route path="/files" element={<Files user={user} />} />
         <Route path="/transfers" element={<Transfers />} />
         <Route path="/settings" element={<Settings user={user} onChange={refresh} />} />
         <Route path="*" element={<Navigate to="/files" replace />} />

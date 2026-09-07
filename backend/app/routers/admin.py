@@ -6,11 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
 
 from app import config, recovery, security, settings_store
+from app.transfers import importer
 from app.telegram.manager import manager
 from app.db import get_db
 from app.models import Session, User, UserRole
 from app.routers.common import user_out
-from app.schemas import SettingsUpdate, UserCreate
+from app.schemas import ImportRequest, SettingsUpdate, UserCreate
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -110,3 +111,45 @@ async def rebuild_start(db: AsyncSession = Depends(get_db), user: User = Depends
     asyncio.create_task(recovery.rebuild(manager, user.id, part_size))
     await asyncio.sleep(0)
     return recovery.snapshot()
+
+
+@router.get("/import/browse")
+async def import_browse(path: str = "", user: User = Depends(security.current_admin)):
+    """List a directory inside the server-side import mount."""
+    if not importer.enabled():
+        return {"enabled": False, "root": str(config.IMPORT_DIR), "path": "", "entries": []}
+    return {"enabled": True, **importer.browse(path)}
+
+
+@router.post("/import")
+async def import_start(data: ImportRequest, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
+    """Import a file or directory from the import mount into the channel.
+    Sources are read in place and never deleted."""
+    from app.models import Folder
+    from app.routers.common import file_out
+    from app.transfers import worker as transfer_worker
+    if data.folder_id is not None:
+        folder = await db.get(Folder, data.folder_id)
+        if folder is None or folder.owner_id != user.id:
+            raise HTTPException(404, "Folder not found")
+    src = importer.resolve(data.path)
+    part_size = await settings_store.part_size_bytes(db)
+    if src.is_file():
+        if data.mode not in ("file", None):
+            raise HTTPException(400, "A file can only be imported as a file")
+        files = [await importer.import_file(db, user.id, data.folder_id, src, part_size)]
+    elif data.mode == "tree":
+        files = await importer.import_tree(db, user.id, data.folder_id, src, part_size)
+    elif data.mode == "zip":
+        name = (data.name or src.name).strip() or src.name
+        if not name.lower().endswith(".zip"):
+            name += ".zip"
+        files = [await importer.start_zip(db, user.id, data.folder_id, src, name[:255], part_size)]
+    else:
+        raise HTTPException(400, "mode must be 'zip' or 'tree' for a directory")
+    await db.commit()
+    for f in files:
+        await db.refresh(f, attribute_names=["parts"])
+        importer.launch(f.id)
+    transfer_worker.kick()
+    return {"files": [file_out(f) for f in files], "count": len(files)}

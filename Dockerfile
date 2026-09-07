@@ -9,7 +9,7 @@ RUN npm run build
 # ---- runtime ----
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    OTS_DATA_DIR=/data OTS_FRONTEND_DIST=/app/frontend/dist
+    OTS_DATA_DIR=/data OTS_IMPORT_DIR=/import OTS_FRONTEND_DIST=/app/frontend/dist
 WORKDIR /app/backend
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

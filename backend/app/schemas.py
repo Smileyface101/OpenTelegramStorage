@@ -110,3 +110,10 @@ class UploadComplete(BaseModel):
     the browser while it read the file."""
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     part_sha256: list[str] | None = None
+
+
+class ImportRequest(BaseModel):
+    path: str = Field(default="", max_length=4096)   # relative to the import directory
+    mode: str | None = None                            # file | zip | tree
+    folder_id: int | None = None
+    name: str | None = Field(default=None, max_length=255)

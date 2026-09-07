@@ -281,10 +281,11 @@ class TransferWorker:
         file.status = FileStatus.READY
         file.ready_at = datetime.utcnow()
         staging = file.staging_path
+        keep = file.keep_source
         file.staging_path = None
         await db.commit()
         progress.clear(file.id)
-        if staging:
+        if staging and not keep:
             try:
                 os.remove(staging)
             except FileNotFoundError:

@@ -24,7 +24,7 @@ function fileIcon(name) {
   return <FileIcon size={18} className="text-ink-400 shrink-0" />
 }
 
-export default function Files() {
+export default function Files({ user }) {
   const [params] = useSearchParams()
   const navigate = useNavigate()
   const folderId = params.get('folder') ? Number(params.get('folder')) : null
@@ -268,6 +268,7 @@ export default function Files() {
                   <MenuItem icon={Upload} title="Files" hint="One entry per file" onClick={() => { setUploadMenu(false); fileInput.current.click() }} />
                   <MenuItem icon={FolderUp} title="Folder" hint="Zip it, or keep the tree" onClick={() => { setUploadMenu(false); openFolderPicker() }} />
                   <MenuItem icon={Archive} title="Files as one zip" hint="Pick several files, get one archive" onClick={() => { setUploadMenu(false); zipInput.current.click() }} />
+                  {user?.role === 'admin' && <MenuItem icon={HardDrive} title="Import from server" hint="Files already on this machine, read in place" onClick={() => { setUploadMenu(false); setModal({ type: 'import' }) }} />}
                   <div className="px-3 py-2 text-xs text-ink-400 border-t border-ink-700 mt-1">…or drop files and folders anywhere on the page, or onto a folder to upload into it.</div>
                 </div>
               )}
@@ -390,6 +391,7 @@ export default function Files() {
       {modal?.type === 'rename' && <NameModal title="Rename" initial={modal.file.name} onClose={() => setModal(null)} onSubmit={async (name) => { await patch(`/api/files/${modal.file.id}`, { name }); setModal(null); load() }} />}
       {modal?.type === 'zip' && <ZipModal items={modal.items} onClose={() => setModal(null)} onSubmit={(items, name) => runZip(items, name, modal.target)} />}
       {modal?.type === 'move' && <MoveModal tree={tree} items={modal.items} currentFolderId={folderId} onClose={() => setModal(null)} onMove={(target) => moveItems(modal.items, target)} />}
+      {modal?.type === 'import' && <ImportModal folderId={folderId} onClose={() => setModal(null)} onDone={() => { setModal(null); load() }} />}
       {modal?.type === 'folder-upload' && <FolderUploadModal items={modal.items} root={modal.root} onClose={() => setModal(null)} onZip={(items, name) => runZip(items, name, modal.target)} onTree={(items, root) => runTree(items, root, modal.target)} />}
     </div>
   )
@@ -560,4 +562,66 @@ function Integrity({ f }) {
   if (f.verified_at) return <ShieldCheck size={14} className="text-emerald-400 shrink-0" title={`Verified ${when(f.verified_at)}`} />
   if (f.status === 'ready' && f.sha256) return <ShieldQuestion size={14} className="text-ink-600 shrink-0" title="Hashed at upload, not yet verified against the channel" />
   return null
+}
+
+function ImportModal({ folderId, onClose, onDone }) {
+  const [path, setPath] = useState('')
+  const [listing, setListing] = useState(null)
+  const [pick, setPick] = useState(null)   // entry object
+  const [mode, setMode] = useState('zip')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const load = async (p) => {
+    setError('')
+    try { const d = await get(`/api/admin/import/browse?path=${encodeURIComponent(p)}`); setListing(d); setPath(d.path || ''); setPick(null) } catch (e) { setError(e.message) }
+  }
+  useEffect(() => { load('') }, [])
+  const crumbs = path ? path.split('/') : []
+  const go = (i) => load(crumbs.slice(0, i).join('/'))
+  const start = async () => {
+    if (!pick) return
+    setBusy(true); setError('')
+    const rel = path ? `${path}/${pick.name}` : pick.name
+    try {
+      const r = await post('/api/admin/import', { path: rel, mode: pick.is_dir ? mode : 'file', folder_id: folderId })
+      onDone(); alert(`${r.count} item(s) queued`)
+    } catch (e) { setError(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <Modal title="Import from server" onClose={onClose}>
+      {listing && !listing.enabled ? (
+        <div className="text-sm text-ink-300 space-y-2">
+          <p>No import directory is mounted.</p>
+          <p className="text-xs text-ink-400">Mount a host directory at <code className="bg-ink-800 px-1 rounded">/import</code> in docker-compose.yml (or set <code className="bg-ink-800 px-1 rounded">OTS_IMPORT_DIR</code>) and restart. Files are read in place and never deleted.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <nav className="flex items-center gap-1 text-xs text-ink-400 flex-wrap">
+            <button className="hover:text-white" onClick={() => go(0)}>{listing?.root || 'import'}</button>
+            {crumbs.map((c, i) => <span key={i} className="flex items-center gap-1"><ChevronRight size={12} /><button className="hover:text-white" onClick={() => go(i + 1)}>{c}</button></span>)}
+          </nav>
+          <div className="max-h-64 overflow-auto rounded-lg border border-ink-700 divide-y divide-ink-800 text-sm">
+            {listing?.entries.length === 0 && <div className="px-3 py-2 text-ink-400">Empty directory</div>}
+            {(listing?.entries || []).map((e) => (
+              <div key={e.name} className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-ink-800 ${pick?.name === e.name ? 'bg-brand-500/15' : ''}`}
+                onClick={() => setPick(e)} onDoubleClick={() => e.is_dir && load(path ? `${path}/${e.name}` : e.name)}>
+                {e.is_dir ? <Folder size={16} className="text-amber-300 shrink-0" /> : fileIcon(e.name)}
+                <span className="truncate flex-1">{e.name}</span>
+                <span className="text-xs text-ink-400 shrink-0">{e.is_dir ? 'folder' : bytes(e.size)}</span>
+              </div>
+            ))}
+          </div>
+          {pick?.is_dir && (
+            <div className="flex gap-4 text-sm">
+              <label className="flex items-center gap-2"><input type="radio" checked={mode === 'zip'} onChange={() => setMode('zip')} /> One zip archive</label>
+              <label className="flex items-center gap-2"><input type="radio" checked={mode === 'tree'} onChange={() => setMode('tree')} /> Keep folder tree</label>
+            </div>
+          )}
+          <p className="text-xs text-ink-400">Double-click a folder to open it, single-click to select. Sources are read in place and never deleted. Imports go into the folder you are viewing.</p>
+          <Alert>{error}</Alert>
+          <div className="flex justify-end gap-2"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={!pick || busy} onClick={start}>{busy ? 'Starting…' : `Import ${pick ? pick.name : ''}`}</button></div>
+        </div>
+      )}
+    </Modal>
+  )
 }
