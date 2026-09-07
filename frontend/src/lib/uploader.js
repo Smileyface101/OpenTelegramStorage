@@ -111,3 +111,30 @@ export function rootFolderName(items) {
   const first = items[0]?.path || ''
   return first.includes('/') ? first.split('/')[0] : ''
 }
+
+// File System Access API (Chrome/Edge): window.showDirectoryPicker() hands us a
+// directory handle. Walking it ourselves avoids the browser having to enumerate
+// the whole tree before its confirmation dialog, and lets us show progress.
+export function supportsDirectoryPicker() {
+  return typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function' && window.isSecureContext
+}
+
+export async function itemsFromDirectoryPicker({ onProgress, signal } = {}) {
+  const root = await window.showDirectoryPicker({ mode: 'read' })
+  const items = []
+  const walk = async (dir, prefix) => {
+    for await (const [name, handle] of dir.entries()) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      if (handle.kind === 'file') {
+        const file = await handle.getFile()
+        items.push({ file, path: prefix + name })
+        if (items.length % 50 === 0) onProgress?.(items.length)
+      } else if (handle.kind === 'directory') {
+        await walk(handle, prefix + name + '/')
+      }
+    }
+  }
+  await walk(root, root.name + '/')
+  onProgress?.(items.length)
+  return items
+}

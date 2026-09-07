@@ -5,7 +5,7 @@ import {
   Search, FolderInput, ArrowUp, ArrowDown, X, Home, CornerLeftUp, Image, Film, Music, FileText, FileArchive, File as FileIcon, HardDrive, Plus,
 } from 'lucide-react'
 import { get, post, del, patch } from '../lib/api'
-import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, rootFolderName } from '../lib/uploader'
+import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, itemsFromDirectoryPicker, supportsDirectoryPicker, rootFolderName } from '../lib/uploader'
 import { bytes, when, pct } from '../lib/format'
 import { Modal, Alert, Progress, StatusBadge } from '../components/ui'
 
@@ -46,6 +46,7 @@ export default function Files() {
   const [sort, setSort] = useState(() => { try { return JSON.parse(localStorage.getItem('ots.sort')) || { key: 'created_at', dir: 'desc' } } catch { return { key: 'created_at', dir: 'desc' } } })
   const [dropTarget, setDropTarget] = useState(null)
   const internalDrag = useRef(null)
+  const [scanning, setScanning] = useState(null)  // number of files found while reading a picked folder
 
   // ---------------------------------------------------------------- data
   const load = useCallback(async () => {
@@ -138,7 +139,20 @@ export default function Files() {
     catch (err) { setError(`Could not read the folder: ${err.message}`) }
     finally { e.target.value = '' }
   }
-  const openFolderPicker = () => {
+  const openFolderPicker = async () => {
+    // Prefer the File System Access API: Chrome then asks a short "view files?"
+    // question instead of enumerating the whole tree first, and we can walk
+    // the folder ourselves with a progress counter.
+    if (supportsDirectoryPicker()) {
+      setScanning(0)
+      try {
+        const items = await itemsFromDirectoryPicker({ onProgress: setScanning })
+        startFolder(items)
+      } catch (err) {
+        if (err?.name !== 'AbortError') setError(`Could not read the folder: ${err.message}`)
+      } finally { setScanning(null) }
+      return
+    }
     const el = dirInput.current
     if (!el || !('webkitdirectory' in el)) { setError('This browser cannot pick folders. Drag the folder onto the page instead.'); return }
     el.click()
@@ -269,6 +283,12 @@ export default function Files() {
           )}
 
           <Alert>{error && <span className="flex justify-between gap-3">{error}<button onClick={() => setError('')}>✕</button></span>}</Alert>
+          {scanning !== null && (
+            <div className="flex items-center gap-3 rounded-xl bg-ink-900 border border-ink-800 px-3 py-2 text-sm">
+              <span className="w-4 h-4 border-2 border-brand-400 border-t-transparent rounded-full animate-spin" />
+              Reading folder… {scanning} file{scanning === 1 ? '' : 's'} found
+            </div>
+          )}
 
           {uploads.length > 0 && (
             <div className="card space-y-3">
