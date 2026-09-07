@@ -14,7 +14,7 @@ from app import security
 from app.db import get_db
 from app.models import File, FileStatus, Folder, User
 from app.routers.common import file_out, folder_out
-from app.schemas import FolderCreate, FolderEnsure, Move, Rename
+from app.schemas import BulkMove, FolderCreate, FolderEnsure, Move, Rename
 from app.telegram.manager import TelegramNotConfigured, manager
 from app.transfers import worker as transfer_worker
 
@@ -86,6 +86,77 @@ async def create_folder(data: FolderCreate, db: AsyncSession = Depends(get_db),
         raise HTTPException(409, "A folder with that name already exists here")
     folder = Folder(owner_id=user.id, parent_id=data.parent_id, name=data.name)
     db.add(folder)
+    await db.commit()
+    return folder_out(folder)
+
+
+@router.get("/folders/tree")
+async def folder_tree(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
+    """Every folder of the user as a flat list with depth, in tree order, for
+    the move picker."""
+    rows = (await db.execute(select(Folder).where(Folder.owner_id == user.id).order_by(Folder.name))).scalars().all()
+    children: dict[int | None, list[Folder]] = {}
+    for f in rows:
+        children.setdefault(f.parent_id, []).append(f)
+    out: list[dict] = []
+
+    def walk(parent_id: int | None, depth: int) -> None:
+        for f in children.get(parent_id, []):
+            out.append({**folder_out(f), "depth": depth})
+            walk(f.id, depth + 1)
+
+    walk(None, 0)
+    return out
+
+
+async def _descendant_ids(db: AsyncSession, folder_id: int) -> set[int]:
+    ids: set[int] = set()
+    stack = [folder_id]
+    while stack:
+        fid = stack.pop()
+        for d in (await db.execute(select(Folder.id).where(Folder.parent_id == fid))).scalars():
+            if d not in ids:
+                ids.add(d)
+                stack.append(d)
+    return ids
+
+
+async def _move_folder(db: AsyncSession, user: User, folder: Folder, target_id: int | None) -> None:
+    if target_id == folder.id or (target_id is not None and target_id in await _descendant_ids(db, folder.id)):
+        raise HTTPException(400, f'Cannot move "{folder.name}" into itself')
+    if folder.parent_id == target_id:
+        return
+    clash = await db.scalar(select(Folder).where(
+        Folder.owner_id == user.id, Folder.parent_id == target_id, Folder.name == folder.name, Folder.id != folder.id))
+    if clash:
+        raise HTTPException(409, f'A folder named "{folder.name}" already exists in the destination')
+    folder.parent_id = target_id
+
+
+@router.post("/move")
+async def bulk_move(data: BulkMove, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
+    """Move files and/or folders into target_folder_id (null = top level).
+    Only the index changes; nothing moves in the channel."""
+    await _own_folder(db, user, data.target_folder_id)
+    moved = 0
+    for fid in dict.fromkeys(data.folder_ids):
+        folder = await _own_folder(db, user, fid)
+        await _move_folder(db, user, folder, data.target_folder_id)
+        moved += 1
+    for file_id in dict.fromkeys(data.file_ids):
+        f = await _own_file(db, user, file_id)
+        f.folder_id = data.target_folder_id
+        moved += 1
+    await db.commit()
+    return {"ok": True, "moved": moved}
+
+
+@router.post("/folders/{folder_id}/move")
+async def move_folder(folder_id: int, data: Move, db: AsyncSession = Depends(get_db),
+                      user: User = Depends(security.current_user)):
+    folder = await _own_folder(db, user, folder_id)
+    await _own_folder(db, user, data.folder_id)
+    await _move_folder(db, user, folder, data.folder_id)
     await db.commit()
     return folder_out(folder)
 

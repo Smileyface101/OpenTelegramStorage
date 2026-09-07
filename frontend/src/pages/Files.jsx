@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
-import { Folder, FolderPlus, FolderUp, Upload, Download, Trash2, Pencil, Archive, RefreshCw, ChevronRight, FileIcon, Search } from 'lucide-react'
+import { Folder, FolderPlus, FolderUp, Upload, Download, Trash2, Pencil, Archive, RefreshCw, ChevronRight, FileIcon, Search, FolderInput, ArrowUp, ArrowDown, X } from 'lucide-react'
 import { get, post, del, patch } from '../lib/api'
 import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, rootFolderName } from '../lib/uploader'
 import { bytes, when, pct } from '../lib/format'
@@ -19,6 +19,10 @@ export default function Files() {
   const fileInput = useRef(null)
   const dirInput = useRef(null)
   const [dragging, setDragging] = useState(false)
+  const [selected, setSelected] = useState({ files: new Set(), folders: new Set() })
+  const [sort, setSort] = useState(() => { try { return JSON.parse(localStorage.getItem('ots.sort')) || { key: 'created_at', dir: 'desc' } } catch { return { key: 'created_at', dir: 'desc' } } })
+  const [dropTarget, setDropTarget] = useState(null)   // folder id (or 'root') highlighted during an internal drag
+  const internalDrag = useRef(null)                     // {files:[], folders:[]} while dragging rows
 
   const load = useCallback(async () => {
     try {
@@ -29,7 +33,56 @@ export default function Files() {
     } catch (e) { setError(e.message) }
   }, [folderId, q])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(); setSelected({ files: new Set(), folders: new Set() }) }, [load])
+  useEffect(() => { try { localStorage.setItem('ots.sort', JSON.stringify(sort)) } catch { /* ignore */ } }, [sort])
+
+  const toggleSort = (key) => setSort((s) => s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: key === 'name' ? 'asc' : 'desc' })
+  const cmp = (a, b) => {
+    const dir = sort.dir === 'asc' ? 1 : -1
+    if (sort.key === 'name') return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) * dir
+    if (sort.key === 'size') return ((a.size ?? -1) - (b.size ?? -1)) * dir
+    if (sort.key === 'status') return String(a.status ?? '').localeCompare(String(b.status ?? '')) * dir
+    return (new Date(a.created_at) - new Date(b.created_at)) * dir
+  }
+  const sortedFolders = data ? [...data.folders].sort(cmp) : []
+  const sortedFiles = data ? [...data.files].sort(cmp) : []
+
+  const toggleSel = (kind, id) => setSelected((s) => { const n = new Set(s[kind]); n.has(id) ? n.delete(id) : n.add(id); return { ...s, [kind]: n } })
+  const selCount = selected.files.size + selected.folders.size
+  const allIds = { files: (data?.files || []).map((f) => f.id), folders: (data?.folders || []).map((d) => d.id) }
+  const allSelected = data && selCount > 0 && selCount === allIds.files.length + allIds.folders.length
+  const toggleAll = () => setSelected(allSelected ? { files: new Set(), folders: new Set() } : { files: new Set(allIds.files), folders: new Set(allIds.folders) })
+
+  const moveItems = async ({ files, folders }, targetFolderId) => {
+    if (!files.length && !folders.length) return
+    if (folders.includes(targetFolderId)) return
+    try {
+      await post('/api/move', { file_ids: files, folder_ids: folders, target_folder_id: targetFolderId })
+      setSelected({ files: new Set(), folders: new Set() })
+      setModal(null)
+      await load()
+    } catch (e) { setError(e.message) }
+  }
+
+  // ---- row drag-and-drop (internal) ----
+  const onRowDragStart = (e, kind, id) => {
+    const inSel = selected[kind].has(id)
+    const payload = inSel
+      ? { files: [...selected.files], folders: [...selected.folders] }
+      : { files: kind === 'files' ? [id] : [], folders: kind === 'folders' ? [id] : [] }
+    internalDrag.current = payload
+    e.dataTransfer.setData('application/x-ots-move', '1')
+    e.dataTransfer.effectAllowed = 'move'
+  }
+  const isInternal = (e) => Array.from(e.dataTransfer.types || []).includes('application/x-ots-move')
+  const onTargetDragOver = (e, target) => { if (!isInternal(e)) return; e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'move'; setDropTarget(target) }
+  const onTargetDrop = (e, targetFolderId) => {
+    if (!isInternal(e)) return
+    e.preventDefault(); e.stopPropagation(); setDropTarget(null)
+    const payload = internalDrag.current; internalDrag.current = null
+    if (payload) moveItems(payload, targetFolderId)
+  }
+  const onRowDragEnd = () => { internalDrag.current = null; setDropTarget(null) }
   const pending = data?.files.some((f) => f.status !== 'ready' && f.status !== 'failed')
   useEffect(() => {
     if (!pending) return
@@ -109,6 +162,7 @@ export default function Files() {
   }
 
   const onDrop = async (e) => {
+    if (isInternal(e)) { e.preventDefault(); setDragging(false); return }
     e.preventDefault(); setDragging(false)
     try {
       const { items, hadDirectory } = await itemsFromDataTransfer(e.dataTransfer)
@@ -129,12 +183,15 @@ export default function Files() {
   const retry = async (f) => { try { await post(`/api/files/${f.id}/retry`); await load() } catch (e) { setError(e.message) } }
 
   return (
-    <div className="space-y-4" onDragOver={(e) => { e.preventDefault(); setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
+    <div className="space-y-4" onDragOver={(e) => { e.preventDefault(); if (!isInternal(e)) setDragging(true) }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
       <div className="flex flex-wrap items-center gap-2">
         <nav className="flex items-center gap-1 text-sm mr-auto">
-          <Link className="hover:underline" to="/files">All files</Link>
+          <Link className={`hover:underline rounded px-1 ${dropTarget === 'root' ? 'bg-brand-500/30 ring-1 ring-brand-500' : ''}`} to="/files"
+            onDragOver={(e) => onTargetDragOver(e, 'root')} onDragLeave={() => setDropTarget(null)} onDrop={(e) => onTargetDrop(e, null)}>All files</Link>
           {(data?.breadcrumbs || []).map((c) => (
-            <span key={c.id} className="flex items-center gap-1"><ChevronRight size={14} className="text-ink-500" /><Link className="hover:underline" to={`/files?folder=${c.id}`}>{c.name}</Link></span>
+            <span key={c.id} className="flex items-center gap-1"><ChevronRight size={14} className="text-ink-500" />
+              <Link className={`hover:underline rounded px-1 ${dropTarget === c.id ? 'bg-brand-500/30 ring-1 ring-brand-500' : ''}`} to={`/files?folder=${c.id}`}
+                onDragOver={(e) => onTargetDragOver(e, c.id)} onDragLeave={() => setDropTarget(null)} onDrop={(e) => onTargetDrop(e, c.id)}>{c.name}</Link></span>
           ))}
         </nav>
         <div className="relative">
@@ -149,6 +206,14 @@ export default function Files() {
         <input ref={dirInput} type="file" webkitdirectory="" directory="" multiple hidden onChange={onPickFolder} />
       </div>
 
+      {selCount > 0 && (
+        <div className="flex items-center gap-2 rounded-lg bg-brand-500/10 border border-brand-500/30 px-3 py-2 text-sm">
+          <span>{selCount} selected</span>
+          <button className="btn-ghost" onClick={() => setModal({ type: 'move', items: { files: [...selected.files], folders: [...selected.folders] } })}><FolderInput size={16} /> Move to…</button>
+          <span className="text-xs text-ink-400 hidden sm:inline">or drag the rows onto a folder</span>
+          <button className="ml-auto text-ink-400 hover:text-white" onClick={() => setSelected({ files: new Set(), folders: new Set() })}><X size={16} /></button>
+        </div>
+      )}
       <Alert>{error && <span className="flex justify-between">{error}<button onClick={() => setError('')}>✕</button></span>}</Alert>
 
       {uploads.length > 0 && (
@@ -168,19 +233,36 @@ export default function Files() {
       <div className={`card p-0 overflow-hidden ${dragging ? 'ring-2 ring-brand-500' : ''}`}>
         {!data ? <div className="p-6 text-sm text-ink-400">Loading…</div> : (
           <table className="w-full text-sm">
-            <thead className="text-xs uppercase text-ink-400 bg-ink-800/50">
-              <tr><th className="text-left p-3">Name</th><th className="text-right p-3 hidden sm:table-cell">Size</th><th className="text-left p-3 hidden md:table-cell">Status</th><th className="text-left p-3 hidden lg:table-cell">Added</th><th className="p-3" /></tr>
+            <thead className="text-xs uppercase text-ink-400 bg-ink-800/50 select-none">
+              <tr>
+                <th className="p-3 w-8"><input type="checkbox" checked={!!allSelected} onChange={toggleAll} disabled={!data || (allIds.files.length + allIds.folders.length) === 0} /></th>
+                <SortTh label="Name" k="name" sort={sort} onClick={toggleSort} className="text-left" />
+                <SortTh label="Size" k="size" sort={sort} onClick={toggleSort} className="text-right hidden sm:table-cell" />
+                <SortTh label="Status" k="status" sort={sort} onClick={toggleSort} className="text-left hidden md:table-cell" />
+                <SortTh label="Added" k="created_at" sort={sort} onClick={toggleSort} className="text-left hidden lg:table-cell" />
+                <th className="p-3" />
+              </tr>
             </thead>
             <tbody>
-              {data.folders.map((d) => (
-                <tr key={`d${d.id}`} className="border-t border-ink-800 hover:bg-ink-800/40">
+              {sortedFolders.map((d) => (
+                <tr key={`d${d.id}`} draggable onDragStart={(e) => onRowDragStart(e, 'folders', d.id)} onDragEnd={onRowDragEnd}
+                  onDragOver={(e) => onTargetDragOver(e, d.id)} onDragLeave={() => setDropTarget(null)} onDrop={(e) => onTargetDrop(e, d.id)}
+                  className={`border-t border-ink-800 hover:bg-ink-800/40 ${selected.folders.has(d.id) ? 'bg-brand-500/10' : ''} ${dropTarget === d.id ? 'bg-brand-500/20 ring-1 ring-inset ring-brand-500' : ''}`}>
+                  <td className="p-3"><input type="checkbox" checked={selected.folders.has(d.id)} onChange={() => toggleSel('folders', d.id)} /></td>
                   <td className="p-3"><Link to={`/files?folder=${d.id}`} className="flex items-center gap-2"><Folder size={16} className="text-amber-300" />{d.name}</Link></td>
-                  <td className="hidden sm:table-cell" /><td className="hidden md:table-cell" /><td className="hidden lg:table-cell" />
-                  <td className="p-3 text-right"><button onClick={() => removeFolder(d)} className="text-ink-400 hover:text-red-300"><Trash2 size={16} /></button></td>
+                  <td className="hidden sm:table-cell" /><td className="hidden md:table-cell" /><td className="p-3 text-ink-400 hidden lg:table-cell">{when(d.created_at)}</td>
+                  <td className="p-3">
+                    <div className="flex justify-end gap-2 text-ink-400">
+                      <button onClick={() => setModal({ type: 'move', items: { files: [], folders: [d.id] } })} className="hover:text-white" title="Move"><FolderInput size={16} /></button>
+                      <button onClick={() => removeFolder(d)} className="hover:text-red-300" title="Delete"><Trash2 size={16} /></button>
+                    </div>
+                  </td>
                 </tr>
               ))}
-              {data.files.map((f) => (
-                <tr key={f.id} className="border-t border-ink-800 hover:bg-ink-800/40">
+              {sortedFiles.map((f) => (
+                <tr key={f.id} draggable onDragStart={(e) => onRowDragStart(e, 'files', f.id)} onDragEnd={onRowDragEnd}
+                  className={`border-t border-ink-800 hover:bg-ink-800/40 ${selected.files.has(f.id) ? 'bg-brand-500/10' : ''}`}>
+                  <td className="p-3"><input type="checkbox" checked={selected.files.has(f.id)} onChange={() => toggleSel('files', f.id)} /></td>
                   <td className="p-3">
                     <div className="flex items-center gap-2 min-w-0">{f.is_archive ? <Archive size={16} className="text-violet-300 shrink-0" /> : <FileIcon size={16} className="text-ink-400 shrink-0" />}
                       <span className="truncate">{f.name}</span>
@@ -195,6 +277,7 @@ export default function Files() {
                     <div className="flex justify-end gap-2 text-ink-400">
                       {f.status === 'ready' && <a href={`/api/files/${f.id}/download`} className="hover:text-white" title="Download"><Download size={16} /></a>}
                       {f.status === 'failed' && <button onClick={() => retry(f)} className="hover:text-white" title="Retry"><RefreshCw size={16} /></button>}
+                      <button onClick={() => setModal({ type: 'move', items: { files: [f.id], folders: [] } })} className="hover:text-white" title="Move"><FolderInput size={16} /></button>
                       <button onClick={() => setModal({ type: 'rename', file: f })} className="hover:text-white" title="Rename"><Pencil size={16} /></button>
                       <button onClick={() => removeFile(f)} className="hover:text-red-300" title="Delete"><Trash2 size={16} /></button>
                     </div>
@@ -202,7 +285,7 @@ export default function Files() {
                 </tr>
               ))}
               {data.folders.length === 0 && data.files.length === 0 && (
-                <tr><td colSpan={5} className="p-10 text-center text-ink-400">Drop files or folders here, or use the buttons above. Files larger than the part size are split into parts automatically.</td></tr>
+                <tr><td colSpan={6} className="p-10 text-center text-ink-400">Drop files or folders here, or use the buttons above. Files larger than the part size are split into parts automatically.</td></tr>
               )}
             </tbody>
           </table>
@@ -212,6 +295,7 @@ export default function Files() {
       {modal?.type === 'folder' && <NameModal title="New folder" onClose={() => setModal(null)} onSubmit={async (name) => { await post('/api/folders', { name, parent_id: folderId }); setModal(null); load() }} />}
       {modal?.type === 'rename' && <NameModal title="Rename" initial={modal.file.name} onClose={() => setModal(null)} onSubmit={async (name) => { await patch(`/api/files/${modal.file.id}`, { name }); setModal(null); load() }} />}
       {modal?.type === 'zip' && <ZipModal items={modal.items} onClose={() => setModal(null)} onSubmit={runZip} />}
+      {modal?.type === 'move' && <MoveModal items={modal.items} currentFolderId={folderId} onClose={() => setModal(null)} onMove={(target) => moveItems(modal.items, target)} />}
       {modal?.type === 'folder-upload' && <FolderUploadModal items={modal.items} root={modal.root} onClose={() => setModal(null)} onZip={runZip} onTree={runTree} />}
     </div>
   )
@@ -277,6 +361,55 @@ function FolderUploadModal({ items, root, onClose, onZip, onTree }) {
         </label>
         <div className="flex justify-end gap-2"><button type="button" className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary">Start</button></div>
       </form>
+    </Modal>
+  )
+}
+
+function SortTh({ label, k, sort, onClick, className = '' }) {
+  const active = sort.key === k
+  return (
+    <th className={`p-3 cursor-pointer hover:text-ink-200 ${className}`} onClick={() => onClick(k)}>
+      <span className="inline-flex items-center gap-1">{label}{active && (sort.dir === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />)}</span>
+    </th>
+  )
+}
+
+function MoveModal({ items, currentFolderId, onClose, onMove }) {
+  const [tree, setTree] = useState(null)
+  const [target, setTarget] = useState(currentFolderId ?? null)
+  const [error, setError] = useState('')
+  useEffect(() => { get('/api/folders/tree').then(setTree).catch((e) => setError(e.message)) }, [])
+  // A folder cannot be moved into itself or its own subtree: hide those.
+  const blocked = new Set()
+  if (tree) {
+    for (const id of items.folders) {
+      const start = tree.findIndex((t) => t.id === id)
+      if (start < 0) continue
+      blocked.add(id)
+      for (let i = start + 1; i < tree.length && tree[i].depth > tree[start].depth; i++) blocked.add(tree[i].id)
+    }
+  }
+  const count = items.files.length + items.folders.length
+  return (
+    <Modal title={`Move ${count} item${count === 1 ? '' : 's'}`} onClose={onClose}>
+      <div className="space-y-3">
+        <div className="max-h-80 overflow-auto rounded-lg border border-ink-700 divide-y divide-ink-800 text-sm">
+          <button className={`w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-ink-800 ${target === null ? 'bg-brand-500/15' : ''}`} onClick={() => setTarget(null)}>
+            <Folder size={16} className="text-amber-300" /> All files
+          </button>
+          {tree === null && <div className="px-3 py-2 text-ink-400">Loading…</div>}
+          {(tree || []).map((t) => (
+            <button key={t.id} disabled={blocked.has(t.id)} style={{ paddingLeft: `${12 + t.depth * 18}px` }}
+              className={`w-full text-left pr-3 py-2 flex items-center gap-2 hover:bg-ink-800 disabled:opacity-40 disabled:cursor-not-allowed ${target === t.id ? 'bg-brand-500/15' : ''}`}
+              onClick={() => setTarget(t.id)}>
+              <Folder size={16} className="text-amber-300" /> {t.name}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-ink-400">Only the listing changes. Nothing is re-uploaded or moved in the Telegram channel.</p>
+        <Alert>{error}</Alert>
+        <div className="flex justify-end gap-2"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary" onClick={() => onMove(target)}>Move here</button></div>
+      </div>
     </Modal>
   )
 }

@@ -160,3 +160,28 @@ async def test_folder_ensure_is_idempotent_and_scoped(api, admin):
     assert sub["parent_id"] == leaf["id"]
     r = await api.post("/api/folders/ensure", json={"path": "../../x"})
     assert r.status_code == 200 and r.json()["name"] == "x"
+
+
+async def test_move_files_and_folders(api, admin, fake_manager):
+    a = (await api.post("/api/folders", json={"name": "A"})).json()
+    b = (await api.post("/api/folders", json={"name": "B"})).json()
+    a1 = (await api.post("/api/folders", json={"name": "A1", "parent_id": a["id"]})).json()
+    f = (await _upload(api, "x.txt", b"x"))["file"]
+    # bulk: file + folder B into A
+    r = await api.post("/api/move", json={"file_ids": [f["id"]], "folder_ids": [b["id"]], "target_folder_id": a["id"]})
+    assert r.status_code == 200 and r.json()["moved"] == 2
+    inside = (await api.get("/api/files", params={"folder_id": a["id"]})).json()
+    assert sorted(d["name"] for d in inside["folders"]) == ["A1", "B"]
+    assert [x["name"] for x in inside["files"]] == ["x.txt"]
+    # cycle: A into its own child A1
+    r = await api.post(f"/api/folders/{a['id']}/move", json={"folder_id": a1["id"]})
+    assert r.status_code == 400
+    # name clash: another "B" at top level, then move A/B up
+    await api.post("/api/folders", json={"name": "B"})
+    r = await api.post(f"/api/folders/{b['id']}/move", json={"folder_id": None})
+    assert r.status_code == 409
+    # move file back to top level; tree lists depth
+    r = await api.post("/api/move", json={"file_ids": [f["id"]], "target_folder_id": None})
+    assert r.status_code == 200
+    tree = (await api.get("/api/folders/tree")).json()
+    assert [(t["name"], t["depth"]) for t in tree] == [("A", 0), ("A1", 1), ("B", 1), ("B", 0)]

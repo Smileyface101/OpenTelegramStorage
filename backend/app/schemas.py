@@ -64,6 +64,12 @@ class Move(BaseModel):
     folder_id: int | None
 
 
+class BulkMove(BaseModel):
+    file_ids: list[str] = Field(default_factory=list, max_length=500)
+    folder_ids: list[int] = Field(default_factory=list, max_length=500)
+    target_folder_id: int | None = None
+
+
 class UploadInit(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     size: int = Field(ge=0)
