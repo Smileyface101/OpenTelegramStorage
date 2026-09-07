@@ -130,3 +130,33 @@ async def test_folders_and_isolation(api, admin, fake_manager):
     assert (await api.get(f"/api/files/{res['file']['id']}")).status_code == 404
     assert (await api.delete(f"/api/folders/{folder['id']}")).status_code == 404
     assert (await api.get("/api/files")).json()["folders"] == []
+
+
+async def test_bundle_keeps_folder_structure(api, admin, fake_manager):
+    b = (await api.post("/api/bundles", json={"name": "trip"})).json()
+    r = await api.post("/api/uploads", json={"name": "a.jpg", "size": 3, "bundle_id": b["id"], "path": "trip/2024/a.jpg"})
+    up1 = r.json()
+    await api.put(f"/api/uploads/{up1['id']}/chunk", content=b"abc", headers={"X-Chunk-Offset": "0"})
+    await api.post(f"/api/uploads/{up1['id']}/complete")
+    # Path traversal attempts are neutralised, and the file name always wins.
+    r = await api.post("/api/uploads", json={"name": "b.txt", "size": 2, "bundle_id": b["id"], "path": "../../etc/x.txt"})
+    up2 = r.json()
+    await api.put(f"/api/uploads/{up2['id']}/chunk", content=b"hi", headers={"X-Chunk-Offset": "0"})
+    await api.post(f"/api/uploads/{up2['id']}/complete")
+    f = (await api.post(f"/api/bundles/{b['id']}/complete")).json()["file"]
+    await _drain(transfer_worker.worker)
+    r = await api.get(f"/api/files/{f['id']}/download")
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert sorted(zf.namelist()) == ["etc/b.txt", "trip/2024/a.jpg"]
+
+
+async def test_folder_ensure_is_idempotent_and_scoped(api, admin):
+    leaf = (await api.post("/api/folders/ensure", json={"path": "photos/2024/june"})).json()
+    again = (await api.post("/api/folders/ensure", json={"path": "photos/2024/june"})).json()
+    assert leaf["id"] == again["id"]
+    root = (await api.get("/api/files")).json()
+    assert [d["name"] for d in root["folders"]] == ["photos"]
+    sub = (await api.post("/api/folders/ensure", json={"path": "raw", "parent_id": leaf["id"]})).json()
+    assert sub["parent_id"] == leaf["id"]
+    r = await api.post("/api/folders/ensure", json={"path": "../../x"})
+    assert r.status_code == 200 and r.json()["name"] == "x"

@@ -28,6 +28,20 @@ def _safe_name(name: str) -> str:
     return name[:255]
 
 
+def _safe_rel_path(path: str | None, name: str) -> str | None:
+    """Normalise a client-supplied relative path: forward slashes, no empty,
+    '.' or '..' components, file name last. Returns None when it adds nothing."""
+    if not path:
+        return None
+    parts = [p.strip() for p in path.replace("\\", "/").split("/")]
+    parts = [p for p in parts if p and p not in (".", "..")]
+    if not parts:
+        return None
+    parts[-1] = name
+    rel = "/".join(parts)
+    return rel if rel != name else None
+
+
 def _check_space(size: int) -> None:
     free = shutil.disk_usage(config.STAGING_DIR).free
     if free < size + config.STAGING_FREE_SPACE_MARGIN:
@@ -66,6 +80,7 @@ async def init_upload(data: UploadInit, db: AsyncSession = Depends(get_db), user
     config.ensure_dirs()
     _check_space(data.size)
     up = Upload(owner_id=user.id, folder_id=data.folder_id, bundle_id=data.bundle_id, name=name,
+                rel_path=_safe_rel_path(data.path, name) if data.bundle_id else None,
                 size=data.size, mime_type=data.mime_type or mimetypes.guess_type(name)[0], path="")
     db.add(up)
     await db.flush()
@@ -168,7 +183,7 @@ async def complete_bundle(bundle_id: str, db: AsyncSession = Depends(get_db), us
     total = sum(u.size for u in ups)
     _check_space(total)
     out_path = str(config.STAGING_DIR / f"{b.id}.zip")
-    members = [(u.name, u.path) for u in ups]
+    members = [(u.rel_path or u.name, u.path) for u in ups]
     try:
         size = await asyncio.to_thread(build_archive, out_path, members, b.compress)
     except Exception as e:  # noqa: BLE001

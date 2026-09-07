@@ -70,6 +70,13 @@ class UploadInit(BaseModel):
     mime_type: str | None = Field(default=None, max_length=128)
     folder_id: int | None = None
     bundle_id: str | None = None
+    path: str | None = Field(default=None, max_length=1024)  # relative path inside a bundle
+
+
+class FolderEnsure(BaseModel):
+    """Create (or find) a nested folder path like "photos/2024" under parent_id."""
+    path: str = Field(min_length=1, max_length=2048)
+    parent_id: int | None = None
 
 
 class BundleCreate(BaseModel):

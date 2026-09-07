@@ -14,7 +14,7 @@ from app import security
 from app.db import get_db
 from app.models import File, FileStatus, Folder, User
 from app.routers.common import file_out, folder_out
-from app.schemas import FolderCreate, Move, Rename
+from app.schemas import FolderCreate, FolderEnsure, Move, Rename
 from app.telegram.manager import TelegramNotConfigured, manager
 from app.transfers import worker as transfer_worker
 
@@ -86,6 +86,40 @@ async def create_folder(data: FolderCreate, db: AsyncSession = Depends(get_db),
         raise HTTPException(409, "A folder with that name already exists here")
     folder = Folder(owner_id=user.id, parent_id=data.parent_id, name=data.name)
     db.add(folder)
+    await db.commit()
+    return folder_out(folder)
+
+
+@router.post("/folders/ensure")
+async def ensure_folder_path(data: FolderEnsure, db: AsyncSession = Depends(get_db),
+                             user: User = Depends(security.current_user)):
+    """Walk/create a nested folder path under parent_id; returns the leaf folder.
+    Idempotent, so the folder uploader can call it per file without races
+    mattering (a duplicate create is caught and re-read)."""
+    parent = await _own_folder(db, user, data.parent_id)
+    parent_id = parent.id if parent else None
+    segments = [s.strip() for s in data.path.replace("\\", "/").split("/")]
+    segments = [s for s in segments if s and s not in (".", "..")]
+    if not segments:
+        raise HTTPException(400, "Empty path")
+    folder = parent
+    for seg in segments:
+        seg = seg[:255]
+        existing = await db.scalar(select(Folder).where(
+            Folder.owner_id == user.id, Folder.parent_id == parent_id, Folder.name == seg))
+        if existing is None:
+            existing = Folder(owner_id=user.id, parent_id=parent_id, name=seg)
+            db.add(existing)
+            try:
+                await db.flush()
+            except Exception:  # noqa: BLE001 - lost a race: re-read
+                await db.rollback()
+                existing = await db.scalar(select(Folder).where(
+                    Folder.owner_id == user.id, Folder.parent_id == parent_id, Folder.name == seg))
+                if existing is None:
+                    raise
+        folder = existing
+        parent_id = folder.id
     await db.commit()
     return folder_out(folder)
 

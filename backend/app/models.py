@@ -132,6 +132,9 @@ class Upload(Base):
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id", ondelete="SET NULL"), nullable=True)
     bundle_id: Mapped[str | None] = mapped_column(ForeignKey("bundles.id", ondelete="CASCADE"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Relative path inside a bundle (e.g. "photos/2024/a.jpg") so a zipped
+    # folder keeps its structure. NULL for plain uploads.
+    rel_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     received: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)

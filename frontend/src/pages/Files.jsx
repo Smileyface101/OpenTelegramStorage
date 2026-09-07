@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
-import { Folder, FolderPlus, Upload, Download, Trash2, Pencil, Archive, RefreshCw, ChevronRight, FileIcon, Search } from 'lucide-react'
+import { Folder, FolderPlus, FolderUp, Upload, Download, Trash2, Pencil, Archive, RefreshCw, ChevronRight, FileIcon, Search } from 'lucide-react'
 import { get, post, del, patch } from '../lib/api'
-import { uploadFile, uploadBundle } from '../lib/uploader'
+import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, rootFolderName } from '../lib/uploader'
 import { bytes, when, pct } from '../lib/format'
 import { Modal, Alert, Progress, StatusBadge } from '../components/ui'
 
@@ -15,6 +15,7 @@ export default function Files() {
   const [uploads, setUploads] = useState([])   // browser -> server in flight
   const [modal, setModal] = useState(null)      // {type:'folder'} | {type:'rename', file} | {type:'zip', files}
   const fileInput = useRef(null)
+  const dirInput = useRef(null)
   const [dragging, setDragging] = useState(false)
 
   const load = useCallback(async () => {
@@ -36,43 +37,65 @@ export default function Files() {
 
   const startUploads = (files, asZip = false) => {
     if (!files.length) return
-    if (asZip) return setModal({ type: 'zip', files })
+    if (asZip) return setModal({ type: 'zip', items: files.map((file) => ({ file, path: file.name })) })
     files.forEach((f) => runUpload(f))
   }
 
+  const startFolder = (items) => {
+    if (!items.length) return
+    setModal({ type: 'folder-upload', items, root: rootFolderName(items) || 'folder' })
+  }
+
+  const track = (name, size) => {
+    const id = crypto.randomUUID()
+    const ctrl = new AbortController()
+    setUploads((u) => [...u, { id, name, size, done: 0, ctrl }])
+    const onProgress = (d) => setUploads((u) => u.map((x) => x.id === id ? { ...x, done: d } : x))
+    const finish = () => setUploads((u) => u.filter((x) => x.id !== id))
+    return { ctrl, onProgress, finish }
+  }
+
   const runUpload = async (file) => {
-    const id = crypto.randomUUID()
-    const ctrl = new AbortController()
-    setUploads((u) => [...u, { id, name: file.name, size: file.size, done: 0, ctrl }])
+    const t = track(file.name, file.size)
     try {
-      await uploadFile(file, { folderId, signal: ctrl.signal, onProgress: (d) => setUploads((u) => u.map((x) => x.id === id ? { ...x, done: d } : x)) })
+      await uploadFile(file, { folderId, signal: t.ctrl.signal, onProgress: t.onProgress })
       await load()
     } catch (e) {
-      if (!ctrl.signal.aborted) setError(`${file.name}: ${e.message}`)
-    } finally {
-      setUploads((u) => u.filter((x) => x.id !== id))
-    }
+      if (!t.ctrl.signal.aborted) setError(`${file.name}: ${e.message}`)
+    } finally { t.finish() }
   }
 
-  const runZip = async (files, name, compress) => {
+  const runZip = async (items, name, compress) => {
     setModal(null)
-    const id = crypto.randomUUID()
-    const ctrl = new AbortController()
-    const size = files.reduce((a, f) => a + f.size, 0)
-    setUploads((u) => [...u, { id, name: `${name}.zip`, size, done: 0, ctrl }])
+    const size = items.reduce((a, it) => a + it.file.size, 0)
+    const t = track(`${name}.zip`, size)
     try {
-      await uploadBundle(files, { name, folderId, compress, signal: ctrl.signal, onProgress: (d) => setUploads((u) => u.map((x) => x.id === id ? { ...x, done: d } : x)) })
+      await uploadBundle(items, { name, folderId, compress, signal: t.ctrl.signal, onProgress: t.onProgress })
       await load()
     } catch (e) {
-      if (!ctrl.signal.aborted) setError(`${name}.zip: ${e.message}`)
-    } finally {
-      setUploads((u) => u.filter((x) => x.id !== id))
-    }
+      if (!t.ctrl.signal.aborted) setError(`${name}.zip: ${e.message}`)
+    } finally { t.finish() }
   }
 
-  const onDrop = (e) => {
+  const runTree = async (items, root) => {
+    setModal(null)
+    const size = items.reduce((a, it) => a + it.file.size, 0)
+    const t = track(`${root}/ (${items.length} files)`, size)
+    try {
+      await uploadTree(items, { folderId, signal: t.ctrl.signal, onProgress: t.onProgress, onFileDone: load })
+      await load()
+    } catch (e) {
+      if (!t.ctrl.signal.aborted) setError(`${root}: ${e.message}`)
+    } finally { t.finish() }
+  }
+
+  const onDrop = async (e) => {
     e.preventDefault(); setDragging(false)
-    startUploads(Array.from(e.dataTransfer.files))
+    try {
+      const { items, hadDirectory } = await itemsFromDataTransfer(e.dataTransfer)
+      if (hadDirectory) startFolder(items)
+      else startUploads(items.map((it) => it.file))
+    } catch (err) { setError(err.message) }
   }
 
   const removeFile = async (f) => {
@@ -99,9 +122,11 @@ export default function Files() {
           <input className="input pl-7 w-48" placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
         <button className="btn-ghost" onClick={() => setModal({ type: 'folder' })}><FolderPlus size={16} /> Folder</button>
-        <button className="btn-ghost" onClick={() => { fileInput.current.dataset.zip = '1'; fileInput.current.click() }}><Archive size={16} /> Upload as zip</button>
-        <button className="btn-primary" onClick={() => { fileInput.current.dataset.zip = ''; fileInput.current.click() }}><Upload size={16} /> Upload</button>
+        <button className="btn-ghost" title="Pick several files; they are zipped into one archive on the server before going to Telegram" onClick={() => { fileInput.current.dataset.zip = '1'; fileInput.current.click() }}><Archive size={16} /> Files as zip</button>
+        <button className="btn-ghost" title="Pick a whole folder (all subfolders included)" onClick={() => dirInput.current.click()}><FolderUp size={16} /> Upload folder</button>
+        <button className="btn-primary" onClick={() => { fileInput.current.dataset.zip = ''; fileInput.current.click() }}><Upload size={16} /> Upload files</button>
         <input ref={fileInput} type="file" multiple hidden onChange={(e) => { startUploads(Array.from(e.target.files), e.target.dataset.zip === '1'); e.target.value = '' }} />
+        <input ref={dirInput} type="file" webkitdirectory="" directory="" multiple hidden onChange={(e) => { startFolder(itemsFromFileList(e.target.files)); e.target.value = '' }} />
       </div>
 
       <Alert>{error && <span className="flex justify-between">{error}<button onClick={() => setError('')}>✕</button></span>}</Alert>
@@ -157,7 +182,7 @@ export default function Files() {
                 </tr>
               ))}
               {data.folders.length === 0 && data.files.length === 0 && (
-                <tr><td colSpan={5} className="p-10 text-center text-ink-400">Drop files here or use Upload. Files larger than the part size are split automatically.</td></tr>
+                <tr><td colSpan={5} className="p-10 text-center text-ink-400">Drop files or folders here, or use the buttons above. Files larger than the part size are split into parts automatically.</td></tr>
               )}
             </tbody>
           </table>
@@ -166,7 +191,8 @@ export default function Files() {
 
       {modal?.type === 'folder' && <NameModal title="New folder" onClose={() => setModal(null)} onSubmit={async (name) => { await post('/api/folders', { name, parent_id: folderId }); setModal(null); load() }} />}
       {modal?.type === 'rename' && <NameModal title="Rename" initial={modal.file.name} onClose={() => setModal(null)} onSubmit={async (name) => { await patch(`/api/files/${modal.file.id}`, { name }); setModal(null); load() }} />}
-      {modal?.type === 'zip' && <ZipModal files={modal.files} onClose={() => setModal(null)} onSubmit={runZip} />}
+      {modal?.type === 'zip' && <ZipModal items={modal.items} onClose={() => setModal(null)} onSubmit={runZip} />}
+      {modal?.type === 'folder-upload' && <FolderUploadModal items={modal.items} root={modal.root} onClose={() => setModal(null)} onZip={runZip} onTree={runTree} />}
     </div>
   )
 }
@@ -185,16 +211,50 @@ function NameModal({ title, initial = '', onClose, onSubmit }) {
   )
 }
 
-function ZipModal({ files, onClose, onSubmit }) {
-  const [name, setName] = useState(files.length === 1 ? files[0].name.replace(/\.[^.]+$/, '') : 'archive')
+function ZipModal({ items, onClose, onSubmit }) {
+  const [name, setName] = useState(items.length === 1 ? items[0].file.name.replace(/\.[^.]+$/, '') : 'archive')
   const [compress, setCompress] = useState(false)
-  const total = files.reduce((a, f) => a + f.size, 0)
+  const total = items.reduce((a, it) => a + it.file.size, 0)
   return (
     <Modal title="Upload as zip" onClose={onClose}>
-      <form onSubmit={(e) => { e.preventDefault(); onSubmit(files, name.trim() || 'archive', compress) }} className="space-y-3">
-        <p className="text-sm text-ink-300">{files.length} file(s), {bytes(total)} total, will be zipped on the server and then sent to the channel.</p>
+      <form onSubmit={(e) => { e.preventDefault(); onSubmit(items, name.trim() || 'archive', compress) }} className="space-y-3">
+        <p className="text-sm text-ink-300">{items.length} file(s), {bytes(total)} total, will be zipped on the server and then sent to the channel.</p>
         <div><label className="label">Archive name</label><div className="flex items-center gap-1"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /><span className="text-ink-400">.zip</span></div></div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={compress} onChange={(e) => setCompress(e.target.checked)} /> Compress (slower; pointless for media and already-compressed files)</label>
+        <div className="flex justify-end gap-2"><button type="button" className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary">Start</button></div>
+      </form>
+    </Modal>
+  )
+}
+
+function FolderUploadModal({ items, root, onClose, onZip, onTree }) {
+  const [mode, setMode] = useState('zip')
+  const [name, setName] = useState(root)
+  const [compress, setCompress] = useState(false)
+  const total = items.reduce((a, it) => a + it.file.size, 0)
+  const submit = (e) => {
+    e.preventDefault()
+    if (mode === 'zip') onZip(items, name.trim() || root, compress)
+    else onTree(items, root)
+  }
+  return (
+    <Modal title={`Upload folder "${root}"`} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <p className="text-sm text-ink-300">{items.length} file(s), {bytes(total)} total, subfolders included.</p>
+        <label className={`block rounded-lg border p-3 cursor-pointer ${mode === 'zip' ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
+          <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={mode === 'zip'} onChange={() => setMode('zip')} /> One zip archive</div>
+          <p className="text-xs text-ink-400 mt-1">Folder structure is kept inside the archive. One entry in your file list, fewer channel messages, and you download it back as a single zip. Best for backups.</p>
+          {mode === 'zip' && (
+            <div className="mt-2 space-y-2">
+              <div className="flex items-center gap-1"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /><span className="text-ink-400">.zip</span></div>
+              <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={compress} onChange={(e) => setCompress(e.target.checked)} /> Compress (slower; pointless for media)</label>
+            </div>
+          )}
+        </label>
+        <label className={`block rounded-lg border p-3 cursor-pointer ${mode === 'tree' ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
+          <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={mode === 'tree'} onChange={() => setMode('tree')} /> Individual files, keep folders</div>
+          <p className="text-xs text-ink-400 mt-1">Recreates the folder tree here so you can browse and download files one by one. Each file becomes its own channel message.</p>
+        </label>
         <div className="flex justify-end gap-2"><button type="button" className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary">Start</button></div>
       </form>
     </Modal>
