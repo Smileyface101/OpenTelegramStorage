@@ -13,7 +13,7 @@ class FakeManager:
     def ready(self) -> bool:
         return self.is_ready
 
-    async def upload_part(self, stream, size, file_name, caption, progress=None):
+    async def upload_part(self, stream, size, file_name, caption, progress=None, connections=1):
         if self.fail_next > 0:
             self.fail_next -= 1
             raise RuntimeError("simulated telegram failure")
@@ -25,6 +25,20 @@ class FakeManager:
         self._next += 1
         self.messages[mid] = (file_name, data, caption)
         return mid
+
+    async def probe_last_message_id(self):
+        mid = self._next
+        self._next += 1
+        return mid
+
+    async def fetch_messages(self, ids):
+        import json
+        out = []
+        for i in ids:
+            if i in self.messages:
+                name, data, cap = self.messages[i]
+                out.append({"id": i, "caption": json.dumps(cap), "size": len(data), "file_name": name})
+        return out
 
     async def get_document(self, message_id):
         if message_id not in self.messages:

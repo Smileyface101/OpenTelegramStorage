@@ -35,8 +35,12 @@ browser ──chunked, resumable──▶ staging dir ──worker──▶ Tele
 * **Real delete.** Deleting a file deletes the channel messages, not just the
   index row.
 * **Self-describing channel.** Every part carries a JSON caption with the file
-  id, name, part number and SHA-256, so the index can be rebuilt from the
-  channel alone (rebuild tool is on the roadmap).
+  id, name, folder path, part number and SHA-256. Settings → Recovery rebuilds
+  the whole index from the channel on a fresh install or after losing the
+  data volume.
+* **Parallel uploads.** Files over 10 MB go to Telegram over several MTProto
+  connections at once (default 4, configurable), several times faster than a
+  single connection.
 
 ## Quick start (Docker)
 
@@ -103,11 +107,10 @@ Staging needs free disk space equal to the largest file you upload (plus a
 
 ## Roadmap
 
-- Rebuild the index from the channel (disaster recovery / second machine).
-- Optional client-side encryption of parts (AES-GCM) so Telegram never holds
-  readable bytes.
-- Multi-connection uploads for higher throughput.
-- TOTP two-factor login.
+- Integrity verification on download (per-part SHA-256 check).
+- Optional encryption of parts (AES-GCM) so Telegram never holds readable bytes.
+- Stale-upload cleanup and staging usage in Settings.
+- Status panel, TOTP two-factor login, expiring share links.
 - User-account (phone) login for 4 GB parts with Telegram Premium.
 
 ## Development

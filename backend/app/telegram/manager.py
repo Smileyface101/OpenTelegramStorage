@@ -19,6 +19,8 @@ from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.types import DocumentAttributeFilename
 
+from app.telegram.fast_upload import BIG_FILE_THRESHOLD, upload_parallel
+
 from app.db import async_session as _session_factory_ref  # noqa: F401  (kept for type hints)
 from app import db as _db
 from app import settings_store
@@ -211,14 +213,27 @@ class TelegramManager:
 
     # -------------------------------------------------------------- transfers
     async def upload_part(self, stream, size: int, file_name: str, caption: dict,
-                          progress: Callable[[int, int], None] | None = None) -> int:
-        """Upload one part as a document message; returns the message id."""
+                          progress: Callable[[int, int], None] | None = None,
+                          connections: int = 1) -> int:
+        """Upload one part as a document message; returns the message id.
+        With connections > 1 and a big enough file the multi-connection path is
+        used; any failure there falls back to Telethon's standard uploader."""
         client = self._require_client()
         entity = await self._channel_entity()
-        uploaded = await client.upload_file(
-            stream, file_size=size, file_name=file_name, part_size_kb=512,
-            progress_callback=progress,
-        )
+        uploaded = None
+        if connections > 1 and size > BIG_FILE_THRESHOLD:
+            try:
+                uploaded = await upload_parallel(client, stream, size, file_name,
+                                                 connections=connections, progress=progress)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Parallel upload failed (%s); falling back to single connection", e)
+                stream.seek(0)
+                uploaded = None
+        if uploaded is None:
+            uploaded = await client.upload_file(
+                stream, file_size=size, file_name=file_name, part_size_kb=512,
+                progress_callback=progress,
+            )
         msg = await client.send_file(
             entity, uploaded, force_document=True,
             caption=json.dumps(caption, separators=(",", ":")),
@@ -247,6 +262,32 @@ class TelegramManager:
             yield bytes(block)
             if remaining <= 0:
                 break
+
+    async def probe_last_message_id(self) -> int:
+        """Bots cannot read channel history, but they can fetch messages by id.
+        Posting and deleting a marker gives the current upper bound."""
+        client = self._require_client()
+        entity = await self._channel_entity()
+        msg = await client.send_message(entity, "OpenTelegramStorage index scan marker (auto-deleted)")
+        await client.delete_messages(entity, [msg.id])
+        return msg.id
+
+    async def fetch_messages(self, ids: list[int]) -> list[dict]:
+        """Return [{id, caption, size, file_name}] for messages that exist and
+        carry a document. Deleted ids are simply absent."""
+        client = self._require_client()
+        entity = await self._channel_entity()
+        out: list[dict] = []
+        msgs = await client.get_messages(entity, ids=ids)
+        for m in msgs or []:
+            if m is None or m.document is None:
+                continue
+            name = None
+            for attr in m.document.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    name = attr.file_name
+            out.append({"id": m.id, "caption": m.message or "", "size": m.document.size, "file_name": name})
+        return out
 
     async def delete_messages(self, message_ids: list[int]) -> None:
         if not message_ids:

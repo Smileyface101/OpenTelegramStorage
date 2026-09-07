@@ -9,6 +9,7 @@ export default function Settings({ user, onChange }) {
     <div className="space-y-6 max-w-2xl">
       {isAdmin && <TelegramSection onChange={onChange} />}
       {isAdmin && <TransferSection />}
+      {isAdmin && <RecoverySection />}
       <PasswordSection />
       {isAdmin && <UsersSection me={user} />}
     </div>
@@ -54,7 +55,7 @@ function TransferSection() {
   useEffect(() => { get('/api/admin/settings').then(setS) }, [])
   const save = async (e) => {
     e.preventDefault(); setMsg(''); setError('')
-    try { setS(await put('/api/admin/settings', { part_size_mb: Number(s.part_size_mb), max_retries: Number(s.max_retries), compress_archives: s.compress_archives })); setMsg('Saved') } catch (err) { setError(err.message) }
+    try { setS(await put('/api/admin/settings', { part_size_mb: Number(s.part_size_mb), max_retries: Number(s.max_retries), compress_archives: s.compress_archives, upload_connections: Number(s.upload_connections) })); setMsg('Saved') } catch (err) { setError(err.message) }
   }
   if (!s) return null
   return (
@@ -67,6 +68,9 @@ function TransferSection() {
         </div>
         <div><label className="label">Retries before a transfer is marked failed</label>
           <input className="input" type="number" min="0" max="20" value={s.max_retries} onChange={(e) => setS({ ...s, max_retries: e.target.value })} /></div>
+        <div><label className="label">Parallel upload connections (1–16)</label>
+          <input className="input" type="number" min="1" max="16" value={s.upload_connections} onChange={(e) => setS({ ...s, upload_connections: e.target.value })} />
+          <p className="text-xs text-ink-400 mt-1">Files over 10 MB are pushed to Telegram over this many connections at once. 4 is a good default; 1 uses the classic single-connection uploader.</p></div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={s.compress_archives} onChange={(e) => setS({ ...s, compress_archives: e.target.checked })} /> Compress zip archives by default</label>
         <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
         <button className="btn-primary">Save</button>
@@ -129,6 +133,38 @@ function UsersSection({ me }) {
         <select className="input" value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })}><option value="user">user</option><option value="admin">admin</option></select>
         <button className="btn-primary justify-center">Add user</button>
       </form>
+      <Alert>{error}</Alert>
+    </Section>
+  )
+}
+
+function RecoverySection() {
+  const [st, setSt] = useState(null)
+  const [error, setError] = useState('')
+  const load = async () => { try { setSt(await get('/api/admin/rebuild')) } catch { /* ignore */ } }
+  useEffect(() => { load() }, [])
+  useEffect(() => { if (!st?.running) return; const t = setInterval(load, 1500); return () => clearInterval(t) }, [st?.running])
+  const start = async () => {
+    setError('')
+    if (!confirm('Scan the whole channel and import every file that is not in the index? Existing entries are left untouched.')) return
+    try { setSt(await post('/api/admin/rebuild')) } catch (e) { setError(e.message) }
+  }
+  return (
+    <Section title="Recovery">
+      <p className="text-sm text-ink-300">Every part the app posts carries a small JSON caption, so the channel alone is enough to rebuild the file list. Use this after restoring the app on a new machine, after losing the data volume, or if the index and the channel ever disagree.</p>
+      <div className="flex items-center gap-3">
+        <button className="btn-ghost" onClick={start} disabled={st?.running}>{st?.running ? 'Scanning…' : 'Rebuild index from channel'}</button>
+        {st?.running && <span className="text-xs text-ink-400">scanned {st.scanned} / {st.last_message_id} messages · {st.parts_found} parts found</span>}
+      </div>
+      {st && !st.running && st.finished_at && (
+        <div className="text-sm text-ink-300">
+          Last run: <b>{st.files_imported}</b> imported, <b>{st.files_skipped}</b> already indexed, <b>{st.files_incomplete}</b> with missing parts.
+          {st.error && <div className="text-red-300">Error: {st.error}</div>}
+        </div>
+      )}
+      {st?.log?.length > 0 && (
+        <pre className="max-h-40 overflow-auto rounded-lg bg-ink-950 p-3 text-xs text-ink-400">{st.log.join('\n')}</pre>
+      )}
       <Alert>{error}</Alert>
     </Section>
   )

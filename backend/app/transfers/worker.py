@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app import config, settings_store
 from app import db as _db
-from app.models import File, FilePart, FileStatus
+from app.models import File, FilePart, FileStatus, Folder
 from app.transfers.io import RangeReader, hash_ranges, part_name, plan_parts
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,21 @@ class Progress:
 progress = Progress()
 
 
-def caption_for(file: File, part: FilePart, total_parts: int) -> dict:
+async def folder_path(db, folder_id: int | None) -> str | None:
+    """"a/b/c" for the file's folder, so a rebuild can restore the tree."""
+    names: list[str] = []
+    seen: set[int] = set()
+    while folder_id is not None and folder_id not in seen:
+        seen.add(folder_id)
+        folder = await db.get(Folder, folder_id)
+        if folder is None:
+            break
+        names.append(folder.name)
+        folder_id = folder.parent_id
+    return "/".join(reversed(names)) or None
+
+
+def caption_for(file: File, part: FilePart, total_parts: int, path: str | None = None) -> dict:
     """Self-describing caption so the channel alone can rebuild the index."""
     return {
         "ots": 1,
@@ -51,6 +65,7 @@ def caption_for(file: File, part: FilePart, total_parts: int) -> dict:
         "psize": part.size,
         "sha256": part.sha256,
         "archive": file.is_archive,
+        "path": path,
     }
 
 
@@ -159,6 +174,8 @@ class TransferWorker:
         file.error = None
         await db.commit()
         total = len(file.parts)
+        path = await folder_path(db, file.folder_id)
+        connections = await settings_store.get_int(db, "transfer.upload_connections", 4)
         for part in file.parts:
             if part.message_id is not None:
                 continue
@@ -170,7 +187,8 @@ class TransferWorker:
             progress.set(file.id, part.index, 0, part.size)
             with RangeReader(file.staging_path, part.offset, part.size, name=name) as reader:
                 message_id = await self.manager.upload_part(
-                    reader, part.size, name, caption_for(file, part, total), progress=_cb)
+                    reader, part.size, name, caption_for(file, part, total, path), progress=_cb,
+                    connections=max(1, min(16, connections)))
             part.message_id = message_id
             part.uploaded_at = datetime.utcnow()
             await db.commit()

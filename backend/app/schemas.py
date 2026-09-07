@@ -95,3 +95,4 @@ class SettingsUpdate(BaseModel):
     part_size_mb: int | None = Field(default=None, ge=1)
     max_retries: int | None = Field(default=None, ge=0, le=20)
     compress_archives: bool | None = None
+    upload_connections: int | None = Field(default=None, ge=1, le=16)

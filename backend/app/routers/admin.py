@@ -3,7 +3,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import config, security, settings_store
+import asyncio
+
+from app import config, recovery, security, settings_store
+from app.telegram.manager import manager
 from app.db import get_db
 from app.models import Session, User, UserRole
 from app.routers.common import user_out
@@ -28,6 +31,8 @@ async def update_settings(data: SettingsUpdate, db: AsyncSession = Depends(get_d
         await settings_store.set(db, "transfer.max_retries", str(data.max_retries))
     if data.compress_archives is not None:
         await settings_store.set(db, "transfer.compress_archives", "true" if data.compress_archives else "false")
+    if data.upload_connections is not None:
+        await settings_store.set(db, "transfer.upload_connections", str(data.upload_connections))
     await db.commit()
     return await settings_store.public_settings(db)
 
@@ -86,3 +91,22 @@ async def toggle_user(user_id: int, db: AsyncSession = Depends(get_db), user: Us
         await db.execute(delete(Session).where(Session.user_id == target.id))
     await db.commit()
     return user_out(target)
+
+
+@router.get("/rebuild")
+async def rebuild_status(user: User = Depends(security.current_admin)):
+    return recovery.snapshot()
+
+
+@router.post("/rebuild")
+async def rebuild_start(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
+    """Scan the channel and import every file not present in the index.
+    Runs in the background; poll GET /api/admin/rebuild for progress."""
+    if not manager.ready():
+        raise HTTPException(503, "Telegram is not connected or no channel is selected")
+    if recovery.state.running:
+        return recovery.snapshot()
+    part_size = await settings_store.part_size_bytes(db)
+    asyncio.create_task(recovery.rebuild(manager, user.id, part_size))
+    await asyncio.sleep(0)
+    return recovery.snapshot()
