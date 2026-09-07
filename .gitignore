@@ -1,0 +1,26 @@
+# data / secrets
+data/
+*.db
+*.db-*
+master.key
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# node
+frontend/node_modules/
+frontend/dist/
+
+# editors / tooling
+.vscode/
+.idea/
+.DS_Store
+.claude/
+.opencode/

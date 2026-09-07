@@ -1,0 +1,265 @@
+"""Single MTProto client for the whole app (Telethon, bot-token login).
+
+Why MTProto and not the HTTP Bot API: the HTTP API caps bot uploads at 50 MB
+and downloads at 20 MB. Over MTProto a bot can send 2000 MiB per message and
+download without limit, which is what makes a hosting tool viable.
+
+The client stays connected while the app runs so it receives channel posts;
+that is how the setup wizard discovers the channel the user added the bot to
+(bots cannot list their chats, but they do get updates from channels they
+administer)."""
+import asyncio
+import json
+import logging
+from dataclasses import dataclass, field
+from typing import AsyncIterator, Callable
+
+from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
+from telethon.sessions import StringSession
+from telethon.tl.types import DocumentAttributeFilename
+
+from app.db import async_session as _session_factory_ref  # noqa: F401  (kept for type hints)
+from app import db as _db
+from app import settings_store
+
+logger = logging.getLogger(__name__)
+
+TEST_MESSAGE = "OpenTelegramHosting connected to this channel ✅ (this message will be deleted)"
+
+
+class TelegramNotConfigured(Exception):
+    pass
+
+
+@dataclass
+class DiscoveredChannel:
+    chat_id: int
+    title: str
+
+
+@dataclass
+class TelegramStatus:
+    configured: bool = False
+    connected: bool = False
+    bot_username: str | None = None
+    bot_id: int | None = None
+    channel_id: int | None = None
+    channel_title: str | None = None
+    error: str | None = None
+    discovered: list[DiscoveredChannel] = field(default_factory=list)
+
+
+class TelegramManager:
+    def __init__(self) -> None:
+        self.client: TelegramClient | None = None
+        self.status = TelegramStatus()
+        self._discovered: dict[int, str] = {}
+        self._lock = asyncio.Lock()
+        self._entity_cache: dict[int, object] = {}
+
+    # ------------------------------------------------------------------ setup
+    async def load_from_settings(self) -> None:
+        """Reconnect at startup using the stored (encrypted) credentials."""
+        async with _db.async_session() as db:
+            api_id = await settings_store.get(db, "telegram.api_id")
+            api_hash = await settings_store.get(db, "telegram.api_hash")
+            bot_token = await settings_store.get(db, "telegram.bot_token")
+            session = await settings_store.get(db, "telegram.session")
+            channel_id = await settings_store.get(db, "telegram.channel_id")
+            channel_title = await settings_store.get(db, "telegram.channel_title")
+        if not (api_id and api_hash and bot_token):
+            self.status = TelegramStatus()
+            return
+        self.status.configured = True
+        if channel_id:
+            self.status.channel_id = int(channel_id)
+            self.status.channel_title = channel_title
+        try:
+            await self._connect(int(api_id), api_hash, bot_token, session)
+        except Exception as e:  # noqa: BLE001 - surface any startup failure in status
+            logger.exception("Telegram reconnect failed")
+            self.status.connected = False
+            self.status.error = str(e)
+
+    async def configure(self, api_id: int, api_hash: str, bot_token: str) -> TelegramStatus:
+        async with self._lock:
+            await self._disconnect()
+            self._discovered.clear()
+            await self._connect(api_id, api_hash, bot_token, None)
+            async with _db.async_session() as db:
+                await settings_store.set(db, "telegram.api_id", str(api_id))
+                await settings_store.set(db, "telegram.api_hash", api_hash)
+                await settings_store.set(db, "telegram.bot_token", bot_token)
+                await settings_store.set(db, "telegram.session", self.client.session.save())
+                await settings_store.delete(db, "telegram.channel_id")
+                await settings_store.delete(db, "telegram.channel_title")
+                await db.commit()
+            self.status.configured = True
+            self.status.channel_id = None
+            self.status.channel_title = None
+            return self.status
+
+    async def disconnect_and_forget(self) -> None:
+        async with self._lock:
+            await self._disconnect()
+            async with _db.async_session() as db:
+                for key in ("telegram.api_id", "telegram.api_hash", "telegram.bot_token",
+                            "telegram.session", "telegram.channel_id", "telegram.channel_title"):
+                    await settings_store.delete(db, key)
+                await db.commit()
+            self.status = TelegramStatus()
+            self._discovered.clear()
+
+    async def _connect(self, api_id: int, api_hash: str, bot_token: str, session: str | None) -> None:
+        client = TelegramClient(StringSession(session or None), api_id, api_hash,
+                                connection_retries=5, retry_delay=2, auto_reconnect=True)
+        await client.start(bot_token=bot_token)
+        me = await client.get_me()
+        self.client = client
+        self.status.connected = True
+        self.status.error = None
+        self.status.bot_username = me.username
+        self.status.bot_id = me.id
+        client.add_event_handler(self._on_channel_post, events.NewMessage())
+        client.add_event_handler(self._on_chat_action, events.ChatAction())
+        logger.info("Telegram connected as @%s", me.username)
+
+    async def _disconnect(self) -> None:
+        if self.client is not None:
+            try:
+                await self.client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+        self.client = None
+        self._entity_cache.clear()
+        self.status.connected = False
+
+    async def _remember_chat(self, chat) -> None:
+        if chat is None or not getattr(chat, "broadcast", False):
+            return
+        cid = int(f"-100{chat.id}")
+        if cid not in self._discovered:
+            self._discovered[cid] = chat.title or str(cid)
+            logger.info("Discovered channel %s (%s)", chat.title, cid)
+            await self._persist_session()
+
+    async def _on_channel_post(self, event) -> None:
+        try:
+            await self._remember_chat(await event.get_chat())
+        except Exception:  # noqa: BLE001
+            logger.debug("channel post handler failed", exc_info=True)
+
+    async def _on_chat_action(self, event) -> None:
+        try:
+            await self._remember_chat(await event.get_chat())
+        except Exception:  # noqa: BLE001
+            logger.debug("chat action handler failed", exc_info=True)
+
+    async def _persist_session(self) -> None:
+        """The StringSession carries the entity cache; save it after we learn
+        about a channel so the bot can address it after a restart."""
+        if self.client is None:
+            return
+        async with _db.async_session() as db:
+            await settings_store.set(db, "telegram.session", self.client.session.save())
+            await db.commit()
+
+    # ---------------------------------------------------------------- channel
+    def discovered(self) -> list[DiscoveredChannel]:
+        return [DiscoveredChannel(cid, title) for cid, title in self._discovered.items()]
+
+    async def set_channel(self, chat_id: int) -> TelegramStatus:
+        client = self._require_client()
+        entity = await client.get_input_entity(chat_id)
+        msg = await client.send_message(entity, TEST_MESSAGE)
+        await client.delete_messages(entity, [msg.id])
+        title = self._discovered.get(chat_id)
+        if title is None:
+            try:
+                full = await client.get_entity(chat_id)
+                title = getattr(full, "title", None)
+            except Exception:  # noqa: BLE001
+                title = None
+        async with _db.async_session() as db:
+            await settings_store.set(db, "telegram.channel_id", str(chat_id))
+            await settings_store.set(db, "telegram.channel_title", title or str(chat_id))
+            await settings_store.set(db, "telegram.session", client.session.save())
+            await db.commit()
+        self.status.channel_id = chat_id
+        self.status.channel_title = title or str(chat_id)
+        self._entity_cache[chat_id] = entity
+        return self.status
+
+    async def _channel_entity(self):
+        client = self._require_client()
+        if self.status.channel_id is None:
+            raise TelegramNotConfigured("No channel configured")
+        ent = self._entity_cache.get(self.status.channel_id)
+        if ent is None:
+            ent = await client.get_input_entity(self.status.channel_id)
+            self._entity_cache[self.status.channel_id] = ent
+        return ent
+
+    def _require_client(self) -> TelegramClient:
+        if self.client is None or not self.status.connected:
+            raise TelegramNotConfigured("Telegram is not connected")
+        return self.client
+
+    def ready(self) -> bool:
+        return self.client is not None and self.status.connected and self.status.channel_id is not None
+
+    # -------------------------------------------------------------- transfers
+    async def upload_part(self, stream, size: int, file_name: str, caption: dict,
+                          progress: Callable[[int, int], None] | None = None) -> int:
+        """Upload one part as a document message; returns the message id."""
+        client = self._require_client()
+        entity = await self._channel_entity()
+        uploaded = await client.upload_file(
+            stream, file_size=size, file_name=file_name, part_size_kb=512,
+            progress_callback=progress,
+        )
+        msg = await client.send_file(
+            entity, uploaded, force_document=True,
+            caption=json.dumps(caption, separators=(",", ":")),
+            attributes=[DocumentAttributeFilename(file_name=file_name)],
+        )
+        return msg.id
+
+    async def get_document(self, message_id: int):
+        client = self._require_client()
+        entity = await self._channel_entity()
+        msg = await client.get_messages(entity, ids=message_id)
+        if msg is None or msg.document is None:
+            raise FileNotFoundError(f"Message {message_id} has no document")
+        return msg.document
+
+    async def iter_download(self, document, offset: int, length: int, chunk: int = 1024 * 1024) -> AsyncIterator[bytes]:
+        """Yield exactly `length` bytes of `document` starting at `offset`."""
+        client = self._require_client()
+        remaining = length
+        async for block in client.iter_download(document, offset=offset, request_size=chunk):
+            if remaining <= 0:
+                break
+            if len(block) > remaining:
+                block = block[:remaining]
+            remaining -= len(block)
+            yield bytes(block)
+            if remaining <= 0:
+                break
+
+    async def delete_messages(self, message_ids: list[int]) -> None:
+        if not message_ids:
+            return
+        client = self._require_client()
+        entity = await self._channel_entity()
+        for i in range(0, len(message_ids), 100):
+            await client.delete_messages(entity, message_ids[i:i + 100])
+
+    async def shutdown(self) -> None:
+        await self._disconnect()
+
+
+manager = TelegramManager()
+
+__all__ = ["manager", "TelegramManager", "TelegramNotConfigured", "FloodWaitError", "TelegramStatus"]
