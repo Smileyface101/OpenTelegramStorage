@@ -98,9 +98,10 @@ export default function Files() {
   // ---------------------------------------------------------------- uploads
   const track = (name, size) => {
     const id = uuid(); const ctrl = new AbortController()
-    setUploads((u) => [...u, { id, name, size, done: 0, ctrl }])
+    setUploads((u) => [...u, { id, name, size, done: 0, ctrl, status: 'uploading' }])
     return {
       ctrl,
+      onStatus: (st) => setUploads((u) => u.map((x) => x.id === id ? { ...x, status: st } : x)),
       onProgress: (d) => setUploads((u) => u.map((x) => x.id === id ? { ...x, done: d } : x)),
       finish: () => setUploads((u) => u.filter((x) => x.id !== id)),
     }
@@ -116,7 +117,7 @@ export default function Files() {
   }
   const runUpload = async (file, target = folderId) => {
     const t = track(file.name, file.size)
-    try { await uploadFile(file, { folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress }); await load() }
+    try { await uploadFile(file, { folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus }); await load() }
     catch (e) { if (!t.ctrl.signal.aborted) setError(`${file.name}: ${e.message}`) }
     finally { t.finish() }
   }
@@ -130,7 +131,7 @@ export default function Files() {
   const runTree = async (items, root, target = folderId) => {
     setModal(null)
     const t = track(`${root}/ (${items.length} files)`, items.reduce((a, it) => a + it.file.size, 0))
-    try { await uploadTree(items, { folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress, onFileDone: load }); await load() }
+    try { await uploadTree(items, { folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus, onFileDone: load }); await load() }
     catch (e) { if (!t.ctrl.signal.aborted) setError(`${root}: ${e.message}`) }
     finally { t.finish() }
   }
@@ -292,10 +293,10 @@ export default function Files() {
 
           {uploads.length > 0 && (
             <div className="card space-y-3">
-              <div className="text-xs uppercase tracking-wide text-ink-400">Uploading to server</div>
+              <div className="text-xs uppercase tracking-wide text-ink-400">Uploading to server <span className="normal-case text-ink-500">· completed parts are sent to Telegram in parallel</span></div>
               {uploads.map((u) => (
                 <div key={u.id}>
-                  <div className="flex justify-between text-sm"><span className="truncate">{u.name}</span>
+                  <div className="flex justify-between text-sm"><span className="truncate">{u.name}{u.status === 'waiting' && <span className="ml-2 text-xs text-amber-300">waiting for Telegram to catch up…</span>}</span>
                     <span className="text-ink-400 flex items-center gap-2 shrink-0">{bytes(u.done)} / {bytes(u.size)}
                       <button onClick={() => u.ctrl.abort()} className="text-red-300 hover:text-red-200">cancel</button></span></div>
                   <Progress value={pct(u.done, u.size)} className="mt-1" />
@@ -344,7 +345,12 @@ export default function Files() {
                           <div className="flex items-center gap-2 min-w-0">{f.is_archive ? <FileArchive size={18} className="text-amber-300 shrink-0" /> : fileIcon(f.name)}
                             <span className="truncate">{f.name}</span>
                             {f.parts_total > 1 && <span className="text-xs text-ink-400 shrink-0">{f.parts_total} parts</span>}</div>
-                          {f.status !== 'ready' && f.status !== 'failed' && <Progress value={pct(f.bytes_done, f.size)} className="mt-1 max-w-xs" />}
+                          {f.status !== 'ready' && f.status !== 'failed' && (
+                            <div className="mt-1 max-w-xs">
+                              <Progress value={pct(f.bytes_done, f.size)} />
+                              {f.status === 'receiving' && <div className="text-[11px] text-ink-400 mt-0.5">{bytes(f.bytes_received)} received · {bytes(f.bytes_done)} in channel</div>}
+                            </div>
+                          )}
                           {f.error && <div className="text-xs text-red-300 mt-1 truncate">{f.error}</div>}
                         </td>
                         <td className="p-3 text-right text-ink-300 hidden sm:table-cell whitespace-nowrap">{bytes(f.size)}</td>

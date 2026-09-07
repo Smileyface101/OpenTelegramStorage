@@ -19,8 +19,9 @@ def file_out(f: File, parts: list[FilePart] | None = None) -> dict:
     done_bytes = sum(p.size for p in parts if p.message_id is not None)
     if live:
         done_bytes += live["sent"]
+    received = sum(min(p.received, p.size) for p in parts) if f.status.value == "receiving" else f.size
     return {
-        "id": f.id, "name": f.name, "size": f.size, "mime_type": f.mime_type,
+        "id": f.id, "name": f.name, "size": f.size, "mime_type": f.mime_type, "bytes_received": received,
         "sha256": f.sha256, "is_archive": f.is_archive, "folder_id": f.folder_id,
         "status": f.status.value, "error": f.error, "retries": f.retries,
         "part_size": f.part_size, "parts_total": len(parts), "parts_uploaded": uploaded,

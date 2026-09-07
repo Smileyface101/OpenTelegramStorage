@@ -5,7 +5,7 @@ import { api, ApiError } from './api'
 
 const MAX_TRIES = 5
 
-export async function uploadFile(file, { folderId = null, bundleId = null, path = null, onProgress, signal } = {}) {
+export async function uploadFile(file, { folderId = null, bundleId = null, path = null, onProgress, onStatus, signal } = {}) {
   const init = await api('/api/uploads', {
     method: 'POST', signal,
     body: { name: file.name, size: file.size, mime_type: file.type || null, folder_id: folderId, bundle_id: bundleId, path },
@@ -22,10 +22,17 @@ export async function uploadFile(file, { folderId = null, bundleId = null, path 
       })
       offset = r.received
       tries = 0
+      onStatus?.('uploading')
       onProgress?.(offset, file.size)
     } catch (e) {
       if (signal?.aborted) throw e
       if (e instanceof ApiError && e.status === 409 && e.detail?.received != null) { offset = e.detail.received; continue }
+      if (e instanceof ApiError && e.status === 429 && e.detail?.code === 'backpressure') {
+        // Staging is full: the server is still pushing earlier parts to Telegram.
+        onStatus?.('waiting')
+        await new Promise(r => setTimeout(r, (e.detail.retry_after || 2) * 1000))
+        continue
+      }
       if (++tries >= MAX_TRIES) throw e
       await new Promise(r => setTimeout(r, 1000 * tries))
     }
@@ -54,7 +61,7 @@ export async function uploadBundle(items, { name, folderId = null, compress = nu
 
 // Upload a folder tree as individual files, recreating the sub-folders in the
 // app under `folderId`. `items` are {file, path} with path like "root/sub/x.jpg".
-export async function uploadTree(items, { folderId = null, onProgress, onFileDone, signal } = {}) {
+export async function uploadTree(items, { folderId = null, onProgress, onStatus, onFileDone, signal } = {}) {
   const total = items.reduce((a, it) => a + it.file.size, 0)
   const folderIds = new Map()  // dir path -> folder id
   const ensure = async (dir) => {
@@ -68,7 +75,7 @@ export async function uploadTree(items, { folderId = null, onProgress, onFileDon
   for (const { file, path } of items) {
     const dir = (path || file.name).split('/').slice(0, -1).join('/')
     const target = await ensure(dir)
-    await uploadFile(file, { folderId: target, signal, onProgress: (d) => onProgress?.(doneBefore + d, total) })
+    await uploadFile(file, { folderId: target, signal, onStatus, onProgress: (d) => onProgress?.(doneBefore + d, total) })
     doneBefore += file.size
     onFileDone?.()
   }

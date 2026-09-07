@@ -1,3 +1,4 @@
+import hashlib
 import io
 import os
 import zipfile
@@ -6,15 +7,23 @@ from app import config
 from app.transfers import worker as transfer_worker
 
 
-async def _upload(api, name, data: bytes, chunk=5000, folder_id=None, bundle_id=None):
+async def _upload(api, name, data: bytes, chunk=5000, folder_id=None, bundle_id=None, drain=True):
+    """Chunked upload like the browser does it. On backpressure (staging full)
+    the worker is run, mirroring what happens in production concurrently."""
     r = await api.post("/api/uploads", json={"name": name, "size": len(data), "folder_id": folder_id,
                                              "bundle_id": bundle_id})
     assert r.status_code == 200, r.text
     up = r.json()
-    for off in range(0, len(data), chunk) or [0]:
+    off = 0
+    while off < len(data):
         r = await api.put(f"/api/uploads/{up['id']}/chunk", content=data[off:off + chunk],
                           headers={"X-Chunk-Offset": str(off), "Content-Type": "application/octet-stream"})
+        if r.status_code == 429 and drain:
+            assert r.json()["detail"]["code"] == "backpressure"
+            assert await transfer_worker.worker.process_one()
+            continue
         assert r.status_code == 200, r.text
+        off = r.json()["received"]
     r = await api.post(f"/api/uploads/{up['id']}/complete")
     assert r.status_code == 200, r.text
     return r.json()
@@ -32,12 +41,14 @@ async def test_upload_split_download_delete(api, admin, fake_manager):
     data = os.urandom(2 * 1024 * 1024 + 12345)  # 3 parts at 1 MiB
     res = await _upload(api, "big.bin", data, chunk=700_000)
     f = res["file"]
-    assert f["status"] == "queued" and f["size"] == len(data)
+    assert f["status"] in ("queued", "ready") and f["size"] == len(data)
+    assert f["sha256"] == hashlib.sha256(data).hexdigest()
 
     await _drain(transfer_worker.worker)
     f = (await api.get(f"/api/files/{f['id']}")).json()
     assert f["status"] == "ready", f
     assert f["parts_total"] == 3 and f["parts_uploaded"] == 3
+    assert not list(config.STAGING_DIR.glob("*.p0*")), "part staging must be cleaned up"
     assert fake_manager.stored_bytes() == data
     names = [v[0] for _k, v in sorted(fake_manager.messages.items())]
     assert names == ["big.bin.001", "big.bin.002", "big.bin.003"]
@@ -78,6 +89,7 @@ async def test_chunk_offset_mismatch_and_resume(api, admin):
     assert r.status_code == 200
     r = await api.post(f"/api/uploads/{up['id']}/complete")
     assert r.status_code == 200 and r.json()["file"]["status"] == "queued"
+    assert r.json()["file"]["sha256"] == hashlib.sha256(b"1234567890").hexdigest()
 
 
 async def test_retry_after_failures(api, admin, fake_manager):
@@ -185,3 +197,60 @@ async def test_move_files_and_folders(api, admin, fake_manager):
     assert r.status_code == 200
     tree = (await api.get("/api/folders/tree")).json()
     assert [(t["name"], t["depth"]) for t in tree] == [("A", 0), ("A1", 1), ("B", 1), ("B", 0)]
+
+
+async def test_streaming_overlap_and_backpressure(api, admin, fake_manager):
+    """Parts go to Telegram while the browser is still sending, staging never
+    holds more than MAX_STAGED_PARTS waiting parts, and per-part hashes are
+    computed incrementally."""
+    from app.transfers.staging import MAX_STAGED_PARTS
+    await api.put("/api/admin/settings", json={"part_size_mb": 1})
+    data = os.urandom(6 * 1024 * 1024 + 5)  # 7 parts
+    r = await api.post("/api/uploads", json={"name": "stream.bin", "size": len(data)})
+    up = r.json()
+    fid = up["file_id"]
+    assert (await api.get(f"/api/files/{fid}")).json()["status"] == "receiving"
+    off, chunk, hit_backpressure = 0, 1024 * 1024, False
+    while off < len(data):
+        r = await api.put(f"/api/uploads/{up['id']}/chunk", content=data[off:off + chunk],
+                          headers={"X-Chunk-Offset": str(off)})
+        if r.status_code == 429:
+            hit_backpressure = True
+            waiting = len([p for p in list(config.STAGING_DIR.glob(f"{fid}.p*"))])
+            assert waiting <= MAX_STAGED_PARTS
+            assert await transfer_worker.worker.process_one()  # a part leaves for Telegram
+            continue
+        assert r.status_code == 200, r.text
+        off = r.json()["received"]
+    assert hit_backpressure
+    # Some parts are already in the channel before the browser finished.
+    assert len(fake_manager.messages) >= MAX_STAGED_PARTS
+    mid = (await api.get(f"/api/files/{fid}")).json()
+    assert mid["status"] == "receiving" and mid["parts_uploaded"] >= MAX_STAGED_PARTS
+    r = await api.post(f"/api/uploads/{up['id']}/complete")
+    assert r.status_code == 200
+    await _drain(transfer_worker.worker)
+    f = (await api.get(f"/api/files/{fid}")).json()
+    assert f["status"] == "ready" and f["parts_uploaded"] == 7
+    assert f["sha256"] == hashlib.sha256(data).hexdigest()
+    assert fake_manager.stored_bytes() == data
+    caps = [v[2] for _k, v in sorted(fake_manager.messages.items())]
+    assert [c["sha256"] for c in caps] == [hashlib.sha256(data[i * 1048576:(i + 1) * 1048576]).hexdigest() for i in range(7)]
+    assert not list(config.STAGING_DIR.glob(f"{fid}.p*"))
+    r = await api.get(f"/api/files/{fid}/download")
+    assert r.content == data
+
+
+async def test_cancel_receiving_upload_removes_channel_parts(api, admin, fake_manager):
+    await api.put("/api/admin/settings", json={"part_size_mb": 1})
+    data = os.urandom(2 * 1024 * 1024)
+    up = (await api.post("/api/uploads", json={"name": "c.bin", "size": len(data)})).json()
+    r = await api.put(f"/api/uploads/{up['id']}/chunk", content=data[:1024 * 1024], headers={"X-Chunk-Offset": "0"})
+    assert r.status_code == 200
+    assert await transfer_worker.worker.process_one()
+    assert len(fake_manager.messages) == 1
+    r = await api.delete(f"/api/uploads/{up['id']}")
+    assert r.status_code == 200
+    assert fake_manager.deleted == [100]
+    assert (await api.get(f"/api/files/{up['file_id']}")).status_code == 404
+    assert not list(config.STAGING_DIR.glob(f"{up['file_id']}.p*"))

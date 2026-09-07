@@ -71,6 +71,7 @@ class Folder(Base):
 
 
 class FileStatus(str, enum.Enum):
+    RECEIVING = "receiving"   # browser still sending; completed parts already flow to Telegram
     QUEUED = "queued"         # staged locally, waiting for the worker
     HASHING = "hashing"       # worker computing part hashes
     UPLOADING = "uploading"   # parts going to Telegram
@@ -115,8 +116,17 @@ class FilePart(Base):
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Streaming uploads: each part is staged in its own file and sent to the
+    # channel as soon as `received` reaches `size`. NULL staging_path means the
+    # part is read from the parent File's whole-file staging (archives).
+    received: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    staging_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     file: Mapped[File] = relationship(back_populates="parts")
+
+    @property
+    def staged(self) -> bool:
+        return self.staging_path is not None and self.received >= self.size
 
 
 class UploadStatus(str, enum.Enum):
@@ -131,6 +141,8 @@ class Upload(Base):
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id", ondelete="SET NULL"), nullable=True)
     bundle_id: Mapped[str | None] = mapped_column(ForeignKey("bundles.id", ondelete="CASCADE"), index=True, nullable=True)
+    # Plain (non-bundle) uploads stream straight into a File's parts.
+    file_id: Mapped[str | None] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     # Relative path inside a bundle (e.g. "photos/2024/a.jpg") so a zipped
     # folder keeps its structure. NULL for plain uploads.

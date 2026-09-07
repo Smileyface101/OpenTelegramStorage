@@ -260,7 +260,10 @@ async def retry_file(file_id: str, db: AsyncSession = Depends(get_db), user: Use
     f = await _own_file(db, user, file_id)
     if f.status != FileStatus.FAILED:
         raise HTTPException(400, "Only failed transfers can be retried")
-    if not f.staging_path or not os.path.exists(f.staging_path):
+    pending = [p for p in f.parts if p.message_id is None]
+    have_whole = bool(f.staging_path and os.path.exists(f.staging_path))
+    have_parts = pending and all(p.staging_path and os.path.exists(p.staging_path) for p in pending)
+    if not (have_whole or have_parts):
         raise HTTPException(410, "The staged copy is gone; upload the file again")
     f.status = FileStatus.QUEUED
     f.retries = 0
@@ -287,6 +290,8 @@ async def _takedown(f: File) -> None:
             os.remove(f.staging_path)
         except FileNotFoundError:
             pass
+    from app.transfers.staging import remove_part_files
+    remove_part_files(f.parts)
 
 
 @router.delete("/files/{file_id}")

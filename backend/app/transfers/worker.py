@@ -16,6 +16,7 @@ from app import config, settings_store
 from app import db as _db
 from app.models import File, FilePart, FileStatus, Folder
 from app.transfers.io import RangeReader, hash_ranges, part_name, plan_parts
+from app.transfers.staging import part_path
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +119,108 @@ class TransferWorker:
             await db.commit()
 
     async def process_one(self) -> bool:
-        """Process the oldest queued file. Returns True if something was done."""
+        """Do one unit of work. Streaming parts (browser still sending, or
+        finished) come first so uploads overlap; then whole-file staged jobs
+        (archives). Returns True if something was done."""
+        if await self._process_streaming_part():
+            return True
+        return await self._process_whole_file()
+
+    async def _process_streaming_part(self) -> bool:
+        async with _db.async_session() as db:
+            part = (await db.execute(
+                select(FilePart).join(File, File.id == FilePart.file_id)
+                .options(selectinload(FilePart.file).selectinload(File.parts))
+                .where(File.status.in_([FileStatus.RECEIVING, FileStatus.QUEUED, FileStatus.UPLOADING]),
+                       File.staging_path.is_(None),
+                       FilePart.message_id.is_(None),
+                       FilePart.staging_path.is_not(None),
+                       FilePart.received >= FilePart.size)
+                .order_by(File.created_at, FilePart.index).limit(1)
+            )).scalar_one_or_none()
+            if part is None:
+                return False
+            file = part.file
+            file_id, part_index = file.id, part.index
+            if not os.path.exists(part.staging_path):
+                # Staging vanished (disk cleaned?) — ask for that range again.
+                part.received = 0
+                part.sha256 = None
+                file.error = f"Part {part.index + 1} was lost from staging; resume the upload to resend it"
+                await db.commit()
+                return True
+            max_retries = await settings_store.get_int(db, "transfer.max_retries", config.MAX_UPLOAD_RETRIES)
+            try:
+                await self._send_part(db, file, part)
+            except Exception as e:  # noqa: BLE001
+                await db.rollback()
+                file = await db.get(File, file_id, options=[selectinload(File.parts)])
+                await self._handle_failure(db, file, e, max_retries)
+                progress.clear(file_id)
+                return True
+            return True
+
+    async def _send_part(self, db, file: File, part: FilePart) -> None:
+        total = len(file.parts)
+        name = part_name(file.name, part.index, total)
+        path = await folder_path(db, file.folder_id)
+        connections = await settings_store.get_int(db, "transfer.upload_connections", 4)
+        if file.status == FileStatus.QUEUED:
+            file.status = FileStatus.UPLOADING
+            await db.commit()
+
+        def _cb(sent: int, size: int, _idx=part.index) -> None:
+            progress.set(file.id, _idx, sent, size)
+
+        progress.set(file.id, part.index, 0, part.size)
+        with RangeReader(part.staging_path, 0, part.size, name=name) as reader:
+            message_id = await self.manager.upload_part(
+                reader, part.size, name, caption_for(file, part, total, path), progress=_cb,
+                connections=max(1, min(16, connections)))
+        part.message_id = message_id
+        part.uploaded_at = datetime.utcnow()
+        staged = part.staging_path
+        file.error = None
+        done = all(p.message_id is not None for p in file.parts)
+        if done and file.status != FileStatus.RECEIVING:
+            file.status = FileStatus.READY
+            file.ready_at = datetime.utcnow()
+        await db.commit()
+        progress.clear(file.id)
+        try:
+            os.remove(staged)
+        except FileNotFoundError:
+            pass
+        if done and file.status == FileStatus.READY:
+            logger.info("File %s (%s) is in the channel: %d part(s)", file.id, file.name, total)
+
+    async def _handle_failure(self, db, file: File, e: Exception, max_retries: int) -> None:
+        wait = getattr(e, "seconds", None)
+        if wait is not None:  # FloodWaitError: not our fault, don't burn a retry
+            logger.warning("Flood wait %ss on file %s", wait, file.id)
+            file.error = f"Telegram asked us to wait {wait}s"
+            if file.status == FileStatus.UPLOADING:
+                file.status = FileStatus.QUEUED
+            await db.commit()
+            await asyncio.sleep(min(int(wait) + 1, 3600))
+            return
+        file.retries += 1
+        file.error = str(e)[:1000]
+        if file.retries >= max_retries:
+            file.status = FileStatus.FAILED
+        elif file.status == FileStatus.UPLOADING:
+            file.status = FileStatus.QUEUED
+        logger.exception("transfer failed for %s (retry %s)", file.id, file.retries)
+        await db.commit()
+        if file.status != FileStatus.FAILED:
+            await asyncio.sleep(min(30, 2 ** file.retries))
+
+    async def _process_whole_file(self) -> bool:
+        """Archives built server-side are staged as one file and split here."""
         async with _db.async_session() as db:
             file = (await db.execute(
                 select(File).options(selectinload(File.parts))
-                .where(File.status == FileStatus.QUEUED)
+                .where(File.status == FileStatus.QUEUED, File.staging_path.is_not(None))
                 .order_by(File.created_at).limit(1)
             )).scalar_one_or_none()
             if file is None:
@@ -134,23 +232,9 @@ class TransferWorker:
             except Exception as e:  # noqa: BLE001
                 await db.rollback()
                 file = await db.get(File, file_id, options=[selectinload(File.parts)])
-                wait = getattr(e, "seconds", None)
-                if wait is not None:  # FloodWaitError: not our fault, don't burn a retry
-                    logger.warning("Flood wait %ss on file %s", wait, file_id)
-                    file.status = FileStatus.QUEUED
-                    file.error = f"Telegram asked us to wait {wait}s"
-                    await db.commit()
-                    await asyncio.sleep(min(int(wait) + 1, 3600))
-                    return True
-                file.retries += 1
-                file.error = str(e)[:1000]
-                file.status = FileStatus.FAILED if file.retries >= max_retries else FileStatus.QUEUED
-                logger.exception("transfer failed for %s (retry %s)", file_id, file.retries)
-                await db.commit()
+                file.status = FileStatus.QUEUED
+                await self._handle_failure(db, file, e, max_retries)
                 progress.clear(file_id)
-                if file.status == FileStatus.QUEUED:
-                    await asyncio.sleep(min(30, 2 ** file.retries))
-                return True
             return True
 
     async def _process(self, db, file: File) -> None:

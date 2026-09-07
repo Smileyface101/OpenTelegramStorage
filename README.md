@@ -17,9 +17,10 @@ Docker volume is the whole state of an installation.
 ## How it works
 
 ```
-browser ──chunked, resumable──▶ staging dir ──worker──▶ Telegram channel (MTProto)
-                                     ▲                          │
-                                 SQLite index  ◀── JSON captions on every part
+browser ──chunked, resumable──▶ part staging ──worker──▶ Telegram channel (MTProto)
+        (next part)                 (≤ 3 parts)   (previous part, concurrently)
+                                        ▲                          │
+                                    SQLite index  ◀── JSON captions on every part
 ```
 
 * **MTProto, not the HTTP Bot API.** The HTTP API caps bot uploads at 50 MB
@@ -27,9 +28,14 @@ browser ──chunked, resumable──▶ staging dir ──worker──▶ Tele
   message and downloads without limit, so the same bot token you get from
   BotFather is enough. You also need an API id/hash from
   [my.telegram.org](https://my.telegram.org/apps).
-* **Split and zip.** Files above the configured part size (default 512 MB,
-  max 1990 MB) become `name.ext.001`, `name.ext.002`, … each as its own message.
-  "Upload as zip" packs a selection into one archive server-side first.
+* **Streaming pipeline.** The browser sends chunks into per-part staging
+  files; the moment a part (default 512 MB, max 1990 MB) is complete it goes to
+  Telegram while the next part is still arriving. Staging holds at most a few
+  parts, so a 60 GB file needs about 1.5 GB of disk, and the total time is the
+  slower hop rather than the sum of both. Parts are hashed as they arrive.
+* **Split and zip.** Large files become `name.ext.001`, `name.ext.002`, … one
+  message each, joined again on download. "Upload as zip" packs a selection
+  into one archive server-side first (archives are still staged whole).
 * **Downloads stream.** Parts are fetched from Telegram and joined on the fly,
   with HTTP Range support, so nothing is buffered on disk.
 * **Real delete.** Deleting a file deletes the channel messages, not just the
@@ -102,8 +108,9 @@ For frontend development run `npm run dev` (proxies `/api` to port 8000).
 | `OTS_DEFAULT_PART_SIZE_MB` | `512` | Initial part size; change later in Settings |
 | `OTS_LOG_LEVEL` | `INFO` | Python log level |
 
-Staging needs free disk space equal to the largest file you upload (plus a
-256 MB margin); the upload is refused otherwise.
+Staging needs free disk space for about four parts (2 GB at the default part
+size) for plain uploads, and the full archive size for "upload as zip"; the
+upload is refused otherwise.
 
 ## Roadmap
 

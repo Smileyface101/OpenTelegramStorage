@@ -1,6 +1,7 @@
 """Browser -> staging resumable uploads, and bundles (server-side zip)."""
 import asyncio
 import logging
+from datetime import datetime
 import mimetypes
 import os
 import shutil
@@ -8,14 +9,15 @@ import shutil
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app import config, security, settings_store
 from app.db import get_db
-from app.models import Bundle, File, FileStatus, Folder, Upload, UploadStatus, User
+from app.models import Bundle, File, FilePart, FileStatus, Folder, Upload, UploadStatus, User
 from app.routers.common import file_out
 from app.schemas import BundleCreate, UploadInit
-from app.transfers import worker as transfer_worker
-from app.transfers.io import build_archive
+from app.transfers import staging, worker as transfer_worker
+from app.transfers.io import build_archive, plan_parts
 
 router = APIRouter(prefix="/api", tags=["uploads"])
 logger = logging.getLogger(__name__)
@@ -48,6 +50,13 @@ def _check_space(size: int) -> None:
         raise HTTPException(507, f"Not enough staging space: need {size} bytes, {free} free")
 
 
+async def _own_file(db: AsyncSession, user: User, file_id: str) -> File:
+    f = await db.get(File, file_id, options=[selectinload(File.parts)])
+    if f is None or f.owner_id != user.id:
+        raise HTTPException(404, "File not found")
+    return f
+
+
 async def _own_upload(db: AsyncSession, user: User, upload_id: str) -> Upload:
     up = await db.get(Upload, upload_id)
     if up is None or up.owner_id != user.id:
@@ -65,7 +74,8 @@ async def _check_folder(db: AsyncSession, user: User, folder_id: int | None) -> 
 
 def _upload_out(up: Upload) -> dict:
     return {"id": up.id, "name": up.name, "size": up.size, "received": up.received,
-            "status": up.status.value, "chunk_size": config.UPLOAD_CHUNK_SIZE, "bundle_id": up.bundle_id}
+            "status": up.status.value, "chunk_size": config.UPLOAD_CHUNK_SIZE, "bundle_id": up.bundle_id,
+            "file_id": up.file_id}
 
 
 # ---------------------------------------------------------------- uploads
@@ -78,14 +88,31 @@ async def init_upload(data: UploadInit, db: AsyncSession = Depends(get_db), user
         if bundle is None or bundle.owner_id != user.id:
             raise HTTPException(404, "Bundle not found")
     config.ensure_dirs()
-    _check_space(data.size)
     up = Upload(owner_id=user.id, folder_id=data.folder_id, bundle_id=data.bundle_id, name=name,
                 rel_path=_safe_rel_path(data.path, name) if data.bundle_id else None,
                 size=data.size, mime_type=data.mime_type or mimetypes.guess_type(name)[0], path="")
     db.add(up)
     await db.flush()
-    up.path = str(config.STAGING_DIR / f"{up.id}.part")
-    open(up.path, "wb").close()
+    if data.bundle_id:
+        # Bundle members are zipped server-side later: whole file in staging.
+        _check_space(data.size)
+        up.path = str(config.STAGING_DIR / f"{up.id}.part")
+        open(up.path, "wb").close()
+    else:
+        # Streaming upload: the File and its parts exist from the first byte;
+        # completed parts go to Telegram while the rest is still arriving, so
+        # staging only ever holds a few parts.
+        part_size = await settings_store.part_size_bytes(db)
+        _check_space(min(data.size, (staging.MAX_STAGED_PARTS + 1) * part_size))
+        f = File(owner_id=user.id, folder_id=data.folder_id, name=name, size=data.size, mime_type=up.mime_type,
+                 part_size=part_size, status=FileStatus.RECEIVING)
+        db.add(f)
+        await db.flush()
+        for index, offset, length in plan_parts(data.size, part_size):
+            db.add(FilePart(file_id=f.id, index=index, offset=offset, size=length))
+        up.file_id = f.id
+        up.path = ""
+        staging.begin(f)
     await db.commit()
     return _upload_out(up)
 
@@ -109,16 +136,37 @@ async def upload_chunk(upload_id: str, request: Request, db: AsyncSession = Depe
         offset = -1
     if offset != up.received:
         raise HTTPException(409, {"code": "offset_mismatch", "received": up.received})
-    written = 0
-    with open(up.path, "r+b") as fh:
-        fh.seek(up.received)
-        async for block in request.stream():
-            if up.received + written + len(block) > up.size:
-                raise HTTPException(400, "Chunk exceeds declared file size")
-            fh.write(block)
-            written += len(block)
-    up.received += written
+    if up.file_id is None:
+        written = 0
+        with open(up.path, "r+b") as fh:
+            fh.seek(up.received)
+            async for block in request.stream():
+                if up.received + written + len(block) > up.size:
+                    raise HTTPException(400, "Chunk exceeds declared file size")
+                fh.write(block)
+                written += len(block)
+        up.received += written
+        await db.commit()
+        return _upload_out(up)
+
+    f = await _own_file(db, user, up.file_id)
+    parts = sorted(f.parts, key=lambda p: p.index)
+    # Backpressure: don't let staging grow beyond a few parts waiting for Telegram.
+    starts_new_part = f.part_size and offset % f.part_size == 0 and offset < f.size
+    if starts_new_part and staging.staged_waiting(parts) >= staging.MAX_STAGED_PARTS:
+        raise HTTPException(429, {"code": "backpressure", "retry_after": 2, "received": up.received},
+                            headers={"Retry-After": "2"})
+    pos = offset
+    completed: list = []
+    async for block in request.stream():
+        if pos + len(block) > up.size:
+            raise HTTPException(400, "Chunk exceeds declared file size")
+        completed += await asyncio.to_thread(staging.write_range, f, parts, pos, block)
+        pos += len(block)
+    up.received = pos
     await db.commit()
+    if completed:
+        transfer_worker.kick()
     return _upload_out(up)
 
 
@@ -133,13 +181,16 @@ async def complete_upload(upload_id: str, db: AsyncSession = Depends(get_db), us
     if up.bundle_id:
         await db.commit()
         return {"upload": _upload_out(up), "file": None}
-    part_size = await settings_store.part_size_bytes(db)
-    f = File(owner_id=user.id, folder_id=up.folder_id, name=up.name, size=up.size, mime_type=up.mime_type,
-             part_size=part_size, status=FileStatus.QUEUED, staging_path=up.path)
-    db.add(f)
+    f = await _own_file(db, user, up.file_id)
+    f.sha256 = staging.whole_digest(f.id)
+    staging.forget(f.id)
+    if all(p.message_id is not None for p in f.parts):
+        f.status = FileStatus.READY
+        f.ready_at = datetime.utcnow()
+    else:
+        f.status = FileStatus.QUEUED
     await db.delete(up)
     await db.commit()
-    await db.refresh(f, attribute_names=["parts"])
     transfer_worker.kick()
     return {"upload": None, "file": file_out(f)}
 
@@ -147,10 +198,17 @@ async def complete_upload(upload_id: str, db: AsyncSession = Depends(get_db), us
 @router.delete("/uploads/{upload_id}")
 async def cancel_upload(upload_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
     up = await _own_upload(db, user, upload_id)
-    try:
-        os.remove(up.path)
-    except FileNotFoundError:
-        pass
+    if up.path:
+        try:
+            os.remove(up.path)
+        except FileNotFoundError:
+            pass
+    if up.file_id:
+        from app.routers.files import _takedown
+        f = await _own_file(db, user, up.file_id)
+        staging.forget(f.id)
+        await _takedown(f)
+        await db.delete(f)
     await db.delete(up)
     await db.commit()
     return {"ok": True}
