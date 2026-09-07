@@ -16,7 +16,7 @@ export default function Login({ onAuth }) {
       <form onSubmit={submit} className="card w-full max-w-sm space-y-4">
         <div className="flex items-center gap-2 font-semibold text-lg">
           <span className="w-9 h-9 rounded-lg bg-brand-500 grid place-items-center text-white"><Send size={18} /></span>
-          OpenTelegramHosting
+          OpenTelegramStorage
         </div>
         <div><label className="label">Username</label>
           <input className="input" autoFocus autoComplete="username" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></div>

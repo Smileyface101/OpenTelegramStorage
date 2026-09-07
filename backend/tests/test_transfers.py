@@ -42,7 +42,7 @@ async def test_upload_split_download_delete(api, admin, fake_manager):
     names = [v[0] for _k, v in sorted(fake_manager.messages.items())]
     assert names == ["big.bin.001", "big.bin.002", "big.bin.003"]
     cap = list(fake_manager.messages.values())[0][2]
-    assert cap["otg"] == 1 and cap["of"] == 3 and cap["name"] == "big.bin"
+    assert cap["ots"] == 1 and cap["of"] == 3 and cap["name"] == "big.bin"
     assert not list(config.STAGING_DIR.glob("*.part")), "staging must be cleaned up"
 
     r = await api.get(f"/api/files/{f['id']}/download")

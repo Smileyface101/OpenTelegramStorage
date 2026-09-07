@@ -1,4 +1,4 @@
-"""OpenTelegramHosting — self-hosted file hosting on a Telegram channel."""
+"""OpenTelegramStorage — self-hosted file hosting on a Telegram channel."""
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -13,9 +13,9 @@ from app.routers import admin, auth, files, setup, telegram, transfers, uploads
 from app.telegram.manager import manager
 from app.transfers import worker as transfer_worker
 
-logging.basicConfig(level=os.getenv("OTG_LOG_LEVEL", "INFO"),
+logging.basicConfig(level=os.getenv("OTS_LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger("otg")
+logger = logging.getLogger("ots")
 
 CSRF_EXEMPT = ("/api/auth/login", "/api/setup/admin")
 
@@ -28,13 +28,13 @@ async def lifespan(app: FastAPI):
     await manager.load_from_settings()
     transfer_worker.worker = transfer_worker.TransferWorker(manager)
     transfer_worker.worker.start()
-    logger.info("OpenTelegramHosting %s ready (data dir %s)", __version__, config.DATA_DIR)
+    logger.info("OpenTelegramStorage %s ready (data dir %s)", __version__, config.DATA_DIR)
     yield
     await transfer_worker.worker.stop()
     await manager.shutdown()
 
 
-app = FastAPI(title="OpenTelegramHosting", version=__version__, lifespan=lifespan,
+app = FastAPI(title="OpenTelegramStorage", version=__version__, lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 
 

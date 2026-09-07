@@ -25,7 +25,7 @@ from app import settings_store
 
 logger = logging.getLogger(__name__)
 
-TEST_MESSAGE = "OpenTelegramHosting connected to this channel ✅ (this message will be deleted)"
+TEST_MESSAGE = "OpenTelegramStorage connected to this channel ✅ (this message will be deleted)"
 
 
 class TelegramNotConfigured(Exception):

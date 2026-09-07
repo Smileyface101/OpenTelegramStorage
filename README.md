@@ -1,4 +1,4 @@
-# OpenTelegramHosting
+# OpenTelegramStorage
 
 Self-hosted file storage that keeps the bytes in a private Telegram channel.
 Run it on your own machine, connect your own bot, drop files in a browser
@@ -41,8 +41,8 @@ browser ──chunked, resumable──▶ staging dir ──worker──▶ Tele
 ## Quick start (Docker)
 
 ```bash
-git clone https://github.com/Smileyface101/OpenTelegramHosting.git
-cd OpenTelegramHosting
+git clone https://github.com/Smileyface101/OpenTelegramStorage.git
+cd OpenTelegramStorage
 cp .env.example .env        # optional; defaults are fine on localhost
 docker compose up -d --build
 ```
@@ -62,8 +62,8 @@ That is it. Drop files on the Files page.
 ```bash
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-OTG_DATA_DIR=../data .venv/bin/alembic upgrade head
-OTG_DATA_DIR=../data .venv/bin/uvicorn main:app --port 8000
+OTS_DATA_DIR=../data .venv/bin/alembic upgrade head
+OTS_DATA_DIR=../data .venv/bin/uvicorn main:app --port 8000
 
 cd ../frontend
 npm install && npm run build      # served by the backend from frontend/dist
@@ -79,24 +79,24 @@ For frontend development run `npm run dev` (proxies `/api` to port 8000).
   on HTTPS. State-changing requests need a CSRF token (double submit).
 * The bot token, API hash and MTProto session are encrypted with AES-256-GCM
   under a master key that lives in `data/master.key` (mode 0600) or in the
-  `OTG_MASTER_KEY` environment variable.
+  `OTS_MASTER_KEY` environment variable.
 * Users only ever see their own folders and files. Admins manage users,
   Telegram settings and transfer settings.
 * The app has no built-in TLS. If you expose it beyond localhost put Caddy,
-  nginx or Cloudflare in front of it and set `OTG_TRUSTED_PROXY_COUNT` and
-  `OTG_COOKIE_SECURE=true`.
+  nginx or Cloudflare in front of it and set `OTS_TRUSTED_PROXY_COUNT` and
+  `OTS_COOKIE_SECURE=true`.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `OTG_DATA_DIR` | `./data` (`/data` in Docker) | Database, master key, staging area |
-| `OTG_MASTER_KEY` | generated | 64 hex chars; overrides `data/master.key` |
-| `OTG_PORT` | `8080` | Host port (compose only) |
-| `OTG_COOKIE_SECURE` | auto | Force the Secure cookie flag on/off |
-| `OTG_TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front of the app |
-| `OTG_DEFAULT_PART_SIZE_MB` | `512` | Initial part size; change later in Settings |
-| `OTG_LOG_LEVEL` | `INFO` | Python log level |
+| `OTS_DATA_DIR` | `./data` (`/data` in Docker) | Database, master key, staging area |
+| `OTS_MASTER_KEY` | generated | 64 hex chars; overrides `data/master.key` |
+| `OTS_PORT` | `8080` | Host port (compose only) |
+| `OTS_COOKIE_SECURE` | auto | Force the Secure cookie flag on/off |
+| `OTS_TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front of the app |
+| `OTS_DEFAULT_PART_SIZE_MB` | `512` | Initial part size; change later in Settings |
+| `OTS_LOG_LEVEL` | `INFO` | Python log level |
 
 Staging needs free disk space equal to the largest file you upload (plus a
 256 MB margin); the upload is refused otherwise.

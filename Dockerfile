@@ -9,15 +9,15 @@ RUN npm run build
 # ---- runtime ----
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    OTG_DATA_DIR=/data OTG_FRONTEND_DIST=/app/frontend/dist
+    OTS_DATA_DIR=/data OTS_FRONTEND_DIST=/app/frontend/dist
 WORKDIR /app/backend
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 COPY --from=web /web/dist /app/frontend/dist
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh && useradd -r -u 10001 otg && mkdir -p /data && chown otg /data
-USER otg
+RUN chmod +x /docker-entrypoint.sh && useradd -r -u 10001 ots && mkdir -p /data && chown ots /data
+USER ots
 VOLUME ["/data"]
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health').status==200 else 1)"

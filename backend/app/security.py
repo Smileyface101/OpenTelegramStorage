@@ -14,8 +14,8 @@ from app import config
 from app.db import get_db
 from app.models import Session, User, UserRole
 
-SESSION_COOKIE = "otg_session"
-CSRF_COOKIE = "otg_csrf"
+SESSION_COOKIE = "ots_session"
+CSRF_COOKIE = "ots_csrf"
 CSRF_HEADER = "x-csrf-token"
 
 _hasher = PasswordHasher(time_cost=3, memory_cost=64 * 1024, parallelism=2)

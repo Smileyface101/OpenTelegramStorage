@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-_tmp = tempfile.mkdtemp(prefix="otg-test-")
-os.environ["OTG_DATA_DIR"] = _tmp
-os.environ["OTG_COOKIE_SECURE"] = "false"
+_tmp = tempfile.mkdtemp(prefix="ots-test-")
+os.environ["OTS_DATA_DIR"] = _tmp
+os.environ["OTS_COOKIE_SECURE"] = "false"
 
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 

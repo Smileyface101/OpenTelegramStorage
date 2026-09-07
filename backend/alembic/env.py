@@ -1,5 +1,5 @@
 """Alembic environment. Migrations run over a plain (sync) sqlite URL derived
-from OTG_DATA_DIR so the same data directory the app uses gets migrated."""
+from OTS_DATA_DIR so the same data directory the app uses gets migrated."""
 from logging.config import fileConfig
 
 from alembic import context

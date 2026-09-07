@@ -29,7 +29,7 @@ export default function Setup({ setup, user, onDone, onAdminCreated }) {
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
       <div className="w-full max-w-lg space-y-4">
-        <h1 className="text-xl font-semibold">Set up OpenTelegramHosting</h1>
+        <h1 className="text-xl font-semibold">Set up OpenTelegramStorage</h1>
         <ol className="flex gap-2 text-xs text-ink-400">
           {['Admin account', 'Connect bot', 'Pick channel'].map((l, i) => (
             <li key={l} className={`rounded-full px-3 py-1 ${step === i + 1 ? 'bg-brand-500 text-white' : 'bg-ink-800'}`}>{i + 1}. {l}</li>

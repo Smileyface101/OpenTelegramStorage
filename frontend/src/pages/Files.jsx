@@ -51,10 +51,10 @@ export default function Files() {
   const onPickFolder = (e) => {
     try {
       const list = e.target.files
-      console.info('[otg] folder picker returned', list?.length, 'files')
+      console.info('[ots] folder picker returned', list?.length, 'files')
       startFolder(itemsFromFileList(list))
     } catch (err) {
-      console.error('[otg] folder picker failed', err)
+      console.error('[ots] folder picker failed', err)
       setError(`Could not read the folder: ${err.message}`)
     } finally { e.target.value = '' }
   }
@@ -112,7 +112,7 @@ export default function Files() {
     e.preventDefault(); setDragging(false)
     try {
       const { items, hadDirectory } = await itemsFromDataTransfer(e.dataTransfer)
-      console.info('[otg] drop:', items.length, 'files, directory =', hadDirectory)
+      console.info('[ots] drop:', items.length, 'files, directory =', hadDirectory)
       if (hadDirectory) startFolder(items)
       else startUploads(items.map((it) => it.file))
     } catch (err) { setError(err.message) }

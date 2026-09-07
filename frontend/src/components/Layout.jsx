@@ -16,7 +16,7 @@ export default function Layout({ user, onLogout, setup }) {
       <aside className="md:w-56 border-b md:border-b-0 md:border-r border-ink-800 bg-ink-900/60 p-4 flex md:flex-col gap-2 md:gap-1 items-center md:items-stretch">
         <Link to="/files" className="flex items-center gap-2 font-semibold text-ink-200 md:mb-4 mr-auto md:mr-0">
           <span className="w-8 h-8 rounded-lg bg-brand-500 grid place-items-center text-white"><Send size={16} /></span>
-          <span className="hidden sm:inline">OpenTelegramHosting</span>
+          <span className="hidden sm:inline">OpenTelegramStorage</span>
         </Link>
         {nav.map(({ to, label, icon: Icon }) => (
           <NavLink key={to} to={to} className={({ isActive }) =>

@@ -1,19 +1,19 @@
 services:
   app:
     build: .
-    image: opentelegramhosting:latest
+    image: opentelegramstorage:latest
     restart: unless-stopped
     ports:
-      - "${OTG_PORT:-8080}:8000"
+      - "${OTS_PORT:-8080}:8000"
     env_file:
       - path: .env
         required: false
     environment:
-      - OTG_DATA_DIR=/data
+      - OTS_DATA_DIR=/data
     volumes:
-      - otg-data:/data
+      - ots-data:/data
     # Uncomment to stage uploads on a specific disk instead of the named volume:
-    #  - /mnt/big-disk/otg:/data
+    #  - /mnt/big-disk/ots:/data
 
 volumes:
-  otg-data:
+  ots-data:

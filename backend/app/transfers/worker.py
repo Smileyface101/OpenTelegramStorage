@@ -42,7 +42,7 @@ progress = Progress()
 def caption_for(file: File, part: FilePart, total_parts: int) -> dict:
     """Self-describing caption so the channel alone can rebuild the index."""
     return {
-        "otg": 1,
+        "ots": 1,
         "id": file.id,
         "name": file.name,
         "size": file.size,

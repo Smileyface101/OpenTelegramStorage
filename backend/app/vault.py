@@ -1,7 +1,7 @@
 """Secrets at rest.
 
 Telegram credentials and the MTProto session are encrypted with AES-256-GCM
-under a master key. The key comes from the OTG_MASTER_KEY environment variable
+under a master key. The key comes from the OTS_MASTER_KEY environment variable
 (64 hex chars) or, failing that, from a 0600 file generated in the data
 directory on first run. Losing the key means re-entering the Telegram
 credentials; nothing else is lost."""
