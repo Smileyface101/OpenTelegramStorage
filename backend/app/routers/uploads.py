@@ -259,6 +259,7 @@ async def complete_upload(upload_id: str, data: UploadComplete | None = None, db
     # Whole digest: prefer what the server computed; after a restart mid-upload
     # only the browser still knows it.
     f.sha256 = server_digest or (data.sha256 if data else None)
+    await db.refresh(f, attribute_names=["parts"])
     if all(p.message_id is not None for p in f.parts):
         f.status = FileStatus.READY
         f.ready_at = datetime.utcnow()
@@ -388,6 +389,7 @@ async def complete_bundle(bundle_id: str, db: AsyncSession = Depends(get_db), us
     await asyncio.to_thread(staging.write_range, f, parts, layout.cd_offset, zipstream.central_directory(layout, crcs))
     f.sha256 = staging.whole_digest(f.id)
     staging.forget(f.id)
+    await db.refresh(f, attribute_names=["parts"])
     if all(p.message_id is not None for p in f.parts):
         f.status = FileStatus.READY
         f.ready_at = datetime.utcnow()

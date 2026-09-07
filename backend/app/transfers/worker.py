@@ -124,7 +124,31 @@ class TransferWorker:
         (archives). Returns True if something was done."""
         if await self._process_streaming_part():
             return True
-        return await self._process_whole_file()
+        if await self._process_whole_file():
+            return True
+        return await self._finalize_ready()
+
+    async def _finalize_ready(self) -> bool:
+        """Safety net for the race between "last part landed" (worker) and
+        "browser/import finished sending" (API): whichever side saw a stale
+        status leaves the file QUEUED with every part in the channel. Flip
+        such files to READY."""
+        async with _db.async_session() as db:
+            rows = (await db.execute(
+                select(File).options(selectinload(File.parts))
+                .where(File.status.in_([FileStatus.QUEUED, FileStatus.UPLOADING]), File.staging_path.is_(None))
+            )).scalars().all()
+            changed = False
+            for f in rows:
+                if f.parts and all(p.message_id is not None for p in f.parts):
+                    f.status = FileStatus.READY
+                    f.ready_at = f.ready_at or datetime.utcnow()
+                    f.error = None
+                    changed = True
+                    logger.info("File %s (%s) is in the channel: %d part(s)", f.id, f.name, len(f.parts))
+            if changed:
+                await db.commit()
+            return changed
 
     async def _process_streaming_part(self) -> bool:
         async with _db.async_session() as db:
@@ -181,6 +205,10 @@ class TransferWorker:
         part.uploaded_at = datetime.utcnow()
         staged = part.staging_path
         file.error = None
+        await db.commit()
+        # Re-read before deciding: the API may have flipped RECEIVING -> QUEUED
+        # while this part was in flight.
+        await db.refresh(file, attribute_names=["status", "parts"])
         done = all(p.message_id is not None for p in file.parts)
         if done and file.status != FileStatus.RECEIVING:
             file.status = FileStatus.READY
