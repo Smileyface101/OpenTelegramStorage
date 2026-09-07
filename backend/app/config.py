@@ -38,7 +38,7 @@ LOGIN_LOCKOUT_MINUTES = 15
 LOGIN_RATE_PER_MINUTE = 20
 
 # Transfers. Telegram caps a single bot upload at 2000 MiB; we keep a margin.
-UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
+UPLOAD_CHUNK_SIZE = _env_int("OTS_UPLOAD_CHUNK_SIZE", 8 * 1024 * 1024)  # browser->server chunk (fixed per install)
 MAX_PART_SIZE_MB = 1990
 DEFAULT_PART_SIZE_MB = _env_int("OTS_DEFAULT_PART_SIZE_MB", 512)
 MAX_UPLOAD_RETRIES = 3

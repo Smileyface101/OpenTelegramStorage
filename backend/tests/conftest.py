@@ -9,6 +9,7 @@ import pytest_asyncio
 _tmp = tempfile.mkdtemp(prefix="ots-test-")
 os.environ["OTS_DATA_DIR"] = _tmp
 os.environ["OTS_COOKIE_SECURE"] = "false"
+os.environ["OTS_UPLOAD_CHUNK_SIZE"] = str(64 * 1024)  # small chunks keep the tests fast
 
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 

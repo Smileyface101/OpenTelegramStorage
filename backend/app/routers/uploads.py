@@ -74,10 +74,28 @@ async def _check_folder(db: AsyncSession, user: User, folder_id: int | None) -> 
         raise HTTPException(404, "Folder not found")
 
 
-def _upload_out(up: Upload) -> dict:
-    return {"id": up.id, "name": up.name, "size": up.size, "received": up.received,
-            "status": up.status.value, "chunk_size": config.UPLOAD_CHUNK_SIZE, "bundle_id": up.bundle_id,
-            "file_id": up.file_id, "part_size": getattr(up, "_part_size", None)}
+_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock(upload_id: str) -> asyncio.Lock:
+    return _locks.setdefault(upload_id, asyncio.Lock())
+
+
+def _total_chunks(size: int) -> int:
+    return max(1, (size + config.UPLOAD_CHUNK_SIZE - 1) // config.UPLOAD_CHUNK_SIZE) if size else 0
+
+
+def _upload_out(up: Upload, part_size: int | None = None) -> dict:
+    out = {"id": up.id, "name": up.name, "size": up.size, "received": up.received,
+           "status": up.status.value, "chunk_size": config.UPLOAD_CHUNK_SIZE, "bundle_id": up.bundle_id,
+           "file_id": up.file_id, "folder_id": up.folder_id, "part_size": part_size or getattr(up, "_part_size", None),
+           "created_at": up.created_at}
+    if up.file_id and up.bundle_id is None:
+        cm = staging.ChunkMap(up.chunk_map, _total_chunks(up.size))
+        out["total_chunks"] = cm.total
+        out["missing_chunks"] = cm.missing()
+        out["parallel"] = True
+    return out
 
 
 # ---------------------------------------------------------------- uploads
@@ -140,9 +158,26 @@ async def init_upload(data: UploadInit, db: AsyncSession = Depends(get_db), user
     return _upload_out(up)
 
 
+@router.get("/uploads")
+async def list_uploads(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
+    """The user's unfinished plain uploads (for the resume banner)."""
+    rows = (await db.execute(select(Upload).where(
+        Upload.owner_id == user.id, Upload.status == UploadStatus.ACTIVE, Upload.bundle_id.is_(None))
+        .order_by(Upload.created_at))).scalars().all()
+    out = []
+    for up in rows:
+        f = await db.get(File, up.file_id) if up.file_id else None
+        d = _upload_out(up, f.part_size if f else None)
+        d["file_status"] = f.status.value if f else None
+        out.append(d)
+    return out
+
+
 @router.get("/uploads/{upload_id}")
 async def upload_status(upload_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
-    return _upload_out(await _own_upload(db, user, upload_id))
+    up = await _own_upload(db, user, upload_id)
+    f = await db.get(File, up.file_id) if up.file_id else None
+    return _upload_out(up, f.part_size if f else None)
 
 
 @router.put("/uploads/{upload_id}/chunk")
@@ -157,6 +192,8 @@ async def upload_chunk(upload_id: str, request: Request, db: AsyncSession = Depe
         offset = int(request.headers.get("x-chunk-offset", "-1"))
     except ValueError:
         offset = -1
+    if up.bundle_id is None and up.file_id is not None:
+        return await _parallel_chunk(request, db, user, up, offset)
     if offset != up.received:
         raise HTTPException(409, {"code": "offset_mismatch", "received": up.received})
     if up.bundle_id is not None:
@@ -174,22 +211,57 @@ async def upload_chunk(upload_id: str, request: Request, db: AsyncSession = Depe
         await db.commit()
         return _upload_out(up)
 
+    raise HTTPException(500, "unreachable")
+
+
+async def _parallel_chunk(request: Request, db: AsyncSession, user: User, up: Upload, offset: int) -> dict:
+    """Accept one fixed-size chunk at any offset. Idempotent: a chunk already
+    present is acknowledged without rewriting. Data lands on disk right away;
+    hashing follows the contiguous prefix under a per-upload lock."""
+    cs = config.UPLOAD_CHUNK_SIZE
+    total = _total_chunks(up.size)
+    if offset < 0 or offset % cs != 0 or offset >= max(up.size, 1):
+        raise HTTPException(400, {"code": "bad_offset", "chunk_size": cs, "size": up.size})
+    idx = offset // cs
+    expected = min(cs, up.size - offset)
+    cm = staging.ChunkMap(up.chunk_map, total)
+    if cm.has(idx):
+        async for _ in request.stream():  # drain
+            pass
+        return _upload_out(up)
     f = await _own_file(db, user, up.file_id)
     parts = sorted(f.parts, key=lambda p: p.index)
-    # Backpressure: don't let staging grow beyond a few parts waiting for Telegram.
-    starts_new_part = f.part_size and offset % f.part_size == 0 and offset < f.size
-    if starts_new_part and staging.staged_waiting(parts) >= staging.MAX_STAGED_PARTS:
+    # Backpressure: chunks may run ahead of the hashed prefix by at most the
+    # staging cap, so disk never holds more than a few parts.
+    first_pending = next((p for p in parts if p.message_id is None), None)
+    if first_pending is not None and f.part_size and (offset // f.part_size) - first_pending.index >= staging.MAX_STAGED_PARTS:
         raise HTTPException(429, {"code": "backpressure", "retry_after": 2, "received": up.received},
                             headers={"Retry-After": "2"})
-    pos = offset
-    completed: list = []
+    buf = bytearray()
     async for block in request.stream():
-        if pos + len(block) > up.size:
-            raise HTTPException(400, "Chunk exceeds declared file size")
-        completed += await asyncio.to_thread(staging.write_range, f, parts, pos, block)
-        pos += len(block)
-    up.received = pos
-    await db.commit()
+        buf += block
+        if len(buf) > expected:
+            raise HTTPException(400, "Chunk larger than expected")
+    if len(buf) != expected:
+        raise HTTPException(400, {"code": "short_chunk", "expected": expected, "got": len(buf)})
+    await asyncio.to_thread(staging.write_at, f, parts, offset, bytes(buf))
+    completed: list = []
+    async with _lock(up.id):
+        await db.refresh(up)
+        cm = staging.ChunkMap(up.chunk_map, total)
+        if not cm.has(idx):
+            cm.set(idx)
+            up.chunk_map = cm.raw()
+            up.received = min(up.size, cm.count() * cs) if cm.count() < total else up.size
+            new_prefix = cm.prefix_from(up.prefix_chunks)
+            if new_prefix > up.prefix_chunks:
+                hashed_to = min(up.prefix_chunks * cs, up.size)
+                contiguous_to = min(new_prefix * cs, up.size)
+                for p in parts:
+                    await db.refresh(p, attribute_names=["message_id"])
+                _, completed = await asyncio.to_thread(staging.advance_hash, f, parts, hashed_to, contiguous_to)
+                up.prefix_chunks = new_prefix
+            await db.commit()
     if completed:
         transfer_worker.kick()
     return _upload_out(up)
@@ -203,6 +275,11 @@ async def complete_upload(upload_id: str, data: UploadComplete | None = None, db
         raise HTTPException(409, "Upload already completed")
     if up.received != up.size:
         raise HTTPException(400, {"code": "incomplete", "received": up.received, "size": up.size})
+    if up.bundle_id is None and up.file_id is not None:
+        cm = staging.ChunkMap(up.chunk_map, _total_chunks(up.size))
+        if cm.prefix_from(0) < cm.total:
+            raise HTTPException(400, {"code": "incomplete", "missing_chunks": cm.missing(50)})
+    _locks.pop(up.id, None)
     up.status = UploadStatus.COMPLETE
     if up.bundle_id:
         bundle = await db.get(Bundle, up.bundle_id)

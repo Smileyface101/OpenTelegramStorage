@@ -5,7 +5,8 @@ import {
   Search, FolderInput, ArrowUp, ArrowDown, X, Home, CornerLeftUp, Image, Film, Music, FileText, FileArchive, File as FileIcon, HardDrive, ShieldCheck, ShieldAlert, ShieldQuestion,
 } from 'lucide-react'
 import { get, post, del, patch } from '../lib/api'
-import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, itemsFromDirectoryPicker, supportsDirectoryPicker, rootFolderName } from '../lib/uploader'
+import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, itemsFromDirectoryPicker, supportsDirectoryPicker, supportsFilePicker, pickFilesWithHandles, rootFolderName } from '../lib/uploader'
+import { listRemembered, forget as forgetUpload } from '../lib/resume'
 import { bytes, when, pct } from '../lib/format'
 import { Modal, Alert, Progress, StatusBadge } from '../components/ui'
 
@@ -47,6 +48,9 @@ export default function Files({ user }) {
   const [dropTarget, setDropTarget] = useState(null)
   const internalDrag = useRef(null)
   const [scanning, setScanning] = useState(null)  // number of files found while reading a picked folder
+  const [pendingUploads, setPendingUploads] = useState([])  // unfinished uploads known to the server
+  const resumeInput = useRef(null)
+  const resumeTarget = useRef(null)
 
   // ---------------------------------------------------------------- data
   const load = useCallback(async () => {
@@ -115,11 +119,63 @@ export default function Files({ user }) {
     if (!items.length) { setError('The selected folder contains no files (or the browser did not grant access to it). Try dragging the folder onto the page instead.'); return }
     setModal({ type: 'folder-upload', items, root: rootFolderName(items) || 'folder', target })
   }
-  const runUpload = async (file, target = folderId) => {
+  const runUpload = async (file, target = folderId, { handle = null, resumeId = null } = {}) => {
     const t = track(file.name, file.size)
-    try { await uploadFile(file, { folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus }); await load() }
-    catch (e) { if (!t.ctrl.signal.aborted) setError(`${file.name}: ${e.message}`) }
+    try {
+      await uploadFile(file, { folderId: target, handle, resumeId, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus })
+      await load(); await loadPending()
+    } catch (e) { if (!t.ctrl.signal.aborted) setError(`${file.name}: ${e.message}`) }
     finally { t.finish() }
+  }
+
+  // ---- interrupted uploads (page reload / browser restart) ----
+  const loadPending = useCallback(async () => {
+    try {
+      const [server, local] = await Promise.all([get('/api/uploads'), listRemembered()])
+      const byId = Object.fromEntries(local.map((r) => [r.uploadId, r]))
+      const active = new Set(uploads.map((u) => u.uploadId).filter(Boolean))
+      setPendingUploads(server.filter((u) => !active.has(u.id)).map((u) => ({ ...u, local: byId[u.id] || null })))
+      for (const r of local) if (!server.some((u) => u.id === r.uploadId)) forgetUpload(r.uploadId)
+    } catch { /* ignore */ }
+  }, [uploads])
+  useEffect(() => { loadPending() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resumeUpload = async (p) => {
+    setError('')
+    const h = p.local?.handle
+    if (h) {
+      try {
+        const perm = await h.requestPermission({ mode: 'read' })
+        if (perm !== 'granted') throw new Error('permission denied')
+        const file = await h.getFile()
+        if (file.size !== p.size) throw new Error('the file on disk has changed size')
+        setPendingUploads((l) => l.filter((x) => x.id !== p.id))
+        return runUpload(file, p.folder_id, { handle: h, resumeId: p.id })
+      } catch (e) { setError(`Could not reopen ${p.name} (${e.message}); please pick the file again.`) }
+    }
+    resumeTarget.current = p
+    resumeInput.current.click()
+  }
+  const onPickResume = async (e) => {
+    const p = resumeTarget.current; const file = e.target.files[0]; e.target.value = ''
+    if (!p || !file) return
+    if (file.name !== p.name || file.size !== p.size) { setError(`That is not the same file: expected ${p.name} (${bytes(p.size)}).`); return }
+    setPendingUploads((l) => l.filter((x) => x.id !== p.id))
+    runUpload(file, p.folder_id, { resumeId: p.id })
+  }
+  const discardUpload = async (p) => {
+    try { await del(`/api/uploads/${p.id}`); await forgetUpload(p.id); setPendingUploads((l) => l.filter((x) => x.id !== p.id)); await load() } catch (e) { setError(e.message) }
+  }
+
+  const pickFiles = async () => {
+    if (supportsFilePicker()) {
+      try {
+        const picked = await pickFilesWithHandles()
+        picked.forEach(({ file, handle }) => runUpload(file, folderId, { handle }))
+      } catch (err) { if (err?.name !== 'AbortError') setError(err.message) }
+      return
+    }
+    fileInput.current.click()
   }
   const runZip = async (items, name, target = folderId) => {
     setModal(null)
@@ -265,7 +321,7 @@ export default function Files({ user }) {
               <button className="btn-primary" onClick={(e) => { e.stopPropagation(); setUploadMenu((v) => !v) }}><Upload size={16} /> Upload <ChevronDown size={14} /></button>
               {uploadMenu && (
                 <div className="absolute right-0 mt-1 w-64 rounded-xl bg-ink-800 border border-ink-700 shadow-xl z-20 p-1 text-sm" onClick={(e) => e.stopPropagation()}>
-                  <MenuItem icon={Upload} title="Files" hint="One entry per file" onClick={() => { setUploadMenu(false); fileInput.current.click() }} />
+                  <MenuItem icon={Upload} title="Files" hint="One entry per file" onClick={() => { setUploadMenu(false); pickFiles() }} />
                   <MenuItem icon={FolderUp} title="Folder" hint="Zip it, or keep the tree" onClick={() => { setUploadMenu(false); openFolderPicker() }} />
                   <MenuItem icon={Archive} title="Files as one zip" hint="Pick several files, get one archive" onClick={() => { setUploadMenu(false); zipInput.current.click() }} />
                   {user?.role === 'admin' && <MenuItem icon={HardDrive} title="Import from server" hint="Files already on this machine, read in place" onClick={() => { setUploadMenu(false); setModal({ type: 'import' }) }} />}
@@ -276,8 +332,21 @@ export default function Files({ user }) {
             <input ref={fileInput} type="file" multiple hidden onChange={(e) => { startUploads(Array.from(e.target.files)); e.target.value = '' }} />
             <input ref={zipInput} type="file" multiple hidden onChange={(e) => { startUploads(Array.from(e.target.files), true); e.target.value = '' }} />
             <input ref={dirInput} type="file" webkitdirectory="" directory="" multiple hidden onChange={onPickFolder} />
+            <input ref={resumeInput} type="file" hidden onChange={onPickResume} />
           </div>
 
+          {pendingUploads.length > 0 && (
+            <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm space-y-1">
+              <div className="font-medium text-amber-200">{pendingUploads.length} interrupted upload{pendingUploads.length === 1 ? '' : 's'}</div>
+              {pendingUploads.map((p) => (
+                <div key={p.id} className="flex items-center gap-2">
+                  <span className="truncate flex-1">{p.name} <span className="text-ink-400 text-xs">{bytes(p.received)} of {bytes(p.size)} received</span></span>
+                  <button className="btn-ghost" onClick={() => resumeUpload(p)}>{p.local?.handle ? 'Resume' : 'Resume (pick file)'}</button>
+                  <button className="btn-danger" onClick={() => discardUpload(p)}>Discard</button>
+                </div>
+              ))}
+            </div>
+          )}
           {selCount > 0 && (
             <div className="flex items-center gap-2 rounded-xl bg-brand-500/10 border border-brand-500/30 px-3 py-2 text-sm">
               <span className="font-medium">{selCount} selected</span>

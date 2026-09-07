@@ -52,7 +52,8 @@ async def test_verify_detects_missing_message(api, admin, fake_manager):
     assert "missing from the channel" in f["integrity_error"]
 
 
-async def _chunked(api, up, data, chunk=5000):
+async def _chunked(api, up, data, chunk=None):
+    chunk = config.UPLOAD_CHUNK_SIZE
     off = 0
     while off < len(data):
         r = await api.put(f"/api/uploads/{up['id']}/chunk", content=data[off:off + chunk], headers={"X-Chunk-Offset": str(off)})
@@ -60,7 +61,7 @@ async def _chunked(api, up, data, chunk=5000):
             assert await transfer_worker.worker.process_one()
             continue
         assert r.status_code == 200, r.text
-        off = r.json()["received"]
+        off += chunk
 
 
 async def test_client_digests_accepted_and_used_after_restart(api, admin, fake_manager):

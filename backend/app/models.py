@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger, Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+    BigInteger, Boolean, DateTime, Enum, ForeignKey, Index, Integer, LargeBinary, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -163,6 +163,11 @@ class Upload(Base):
     # bytes received so far (persisted so a restart never loses it).
     member_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     crc32: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # Plain uploads accept chunks in any order: one bit per fixed-size chunk.
+    # prefix_chunks = how many leading chunks are present AND hashed; the
+    # part digests advance with this prefix, never out of order.
+    chunk_map: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    prefix_chunks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

@@ -111,3 +111,95 @@ def remove_part_files(parts: list[FilePart]) -> None:
                 os.remove(p.staging_path)
             except FileNotFoundError:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Out-of-order chunk support (parallel browser uploads).
+#
+# Data is written wherever it lands; hashing only ever follows the contiguous
+# prefix. A part is "complete" when the prefix has passed its end, at which
+# point its digest is final and the worker may ship it.
+# ---------------------------------------------------------------------------
+
+def _part_for(parts: list[FilePart], file: File, pos: int) -> FilePart:
+    return parts[pos // file.part_size] if file.part_size else parts[0]
+
+
+def write_at(file: File, parts: list[FilePart], offset: int, data: bytes) -> None:
+    """Write `data` at file offset `offset` into the right part file(s)."""
+    pos = offset
+    view = memoryview(data)
+    while view:
+        part = _part_for(parts, file, pos)
+        if part.staging_path is None:
+            part.staging_path = part_path(file.id, part.index)
+        local = pos - part.offset
+        chunk = view[:part.size - local]
+        with open(part.staging_path, "r+b" if os.path.exists(part.staging_path) else "wb") as fh:
+            fh.seek(local)
+            fh.write(chunk)
+        pos += len(chunk)
+        view = view[len(chunk):]
+
+
+def advance_hash(file: File, parts: list[FilePart], hashed_to: int, contiguous_to: int) -> tuple[int, list[FilePart]]:
+    """Feed the hashers with bytes [hashed_to, contiguous_to) read back from
+    the part files (page cache makes this cheap). Returns the new hashed_to
+    and the parts that became complete."""
+    st = _state(file, fresh=(hashed_to == 0))
+    completed: list[FilePart] = []
+    pos = hashed_to
+    while pos < contiguous_to:
+        part = _part_for(parts, file, pos)
+        local = pos - part.offset
+        take = min(part.offset + part.size, contiguous_to) - pos
+        h = _part_hasher(st, part) if local else st.parts.setdefault(part.index, hashlib.sha256())
+        with open(part.staging_path, "rb") as fh:
+            fh.seek(local)
+            remaining = take
+            while remaining > 0:
+                block = fh.read(min(HASH_BLOCK, remaining))
+                if not block:
+                    raise IOError("staging file shorter than expected")
+                h.update(block)
+                if st.whole is not None:
+                    st.whole.update(block)
+                remaining -= len(block)
+        pos += take
+        part.received = pos - part.offset
+        if part.received >= part.size:
+            part.sha256 = h.hexdigest()
+            st.parts.pop(part.index, None)
+            completed.append(part)
+    return pos, completed
+
+
+class ChunkMap:
+    """Bitmap of received chunks, stored as bytes on the Upload row."""
+
+    def __init__(self, raw: bytes | None, total_chunks: int) -> None:
+        self.total = total_chunks
+        self.bits = bytearray(raw) if raw else bytearray((total_chunks + 7) // 8)
+        if len(self.bits) < (total_chunks + 7) // 8:
+            self.bits.extend(bytes((total_chunks + 7) // 8 - len(self.bits)))
+
+    def has(self, i: int) -> bool:
+        return bool(self.bits[i >> 3] & (1 << (i & 7)))
+
+    def set(self, i: int) -> None:
+        self.bits[i >> 3] |= 1 << (i & 7)
+
+    def count(self) -> int:
+        return sum(bin(b).count("1") for b in self.bits)
+
+    def prefix_from(self, start: int) -> int:
+        i = start
+        while i < self.total and self.has(i):
+            i += 1
+        return i
+
+    def raw(self) -> bytes:
+        return bytes(self.bits)
+
+    def missing(self, limit: int = 100000) -> list[int]:
+        return [i for i in range(self.total) if not self.has(i)][:limit]

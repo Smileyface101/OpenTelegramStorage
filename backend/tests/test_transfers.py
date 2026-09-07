@@ -7,9 +7,13 @@ from app import config
 from app.transfers import worker as transfer_worker
 
 
-async def _upload(api, name, data: bytes, chunk=5000, folder_id=None, bundle_id=None, drain=True):
+CHUNK = config.UPLOAD_CHUNK_SIZE
+
+
+async def _upload(api, name, data: bytes, chunk=None, folder_id=None, bundle_id=None, drain=True):
     """Chunked upload like the browser does it. On backpressure (staging full)
     the worker is run, mirroring what happens in production concurrently."""
+    chunk = CHUNK
     r = await api.post("/api/uploads", json={"name": name, "size": len(data), "folder_id": folder_id,
                                              "bundle_id": bundle_id})
     assert r.status_code == 200, r.text
@@ -23,7 +27,7 @@ async def _upload(api, name, data: bytes, chunk=5000, folder_id=None, bundle_id=
             assert await transfer_worker.worker.process_one()
             continue
         assert r.status_code == 200, r.text
-        off = r.json()["received"]
+        off += chunk
     r = await api.post(f"/api/uploads/{up['id']}/complete")
     assert r.status_code == 200, r.text
     return r.json()
@@ -39,7 +43,7 @@ async def test_upload_split_download_delete(api, admin, fake_manager):
     r = await api.put("/api/admin/settings", json={"part_size_mb": 1})
     assert r.status_code == 200 and r.json()["part_size_mb"] == 1
     data = os.urandom(2 * 1024 * 1024 + 12345)  # 3 parts at 1 MiB
-    res = await _upload(api, "big.bin", data, chunk=700_000)
+    res = await _upload(api, "big.bin", data)
     f = res["file"]
     assert f["status"] in ("queued", "ready") and f["size"] == len(data)
     assert f["sha256"] == hashlib.sha256(data).hexdigest()
@@ -74,22 +78,49 @@ async def test_upload_split_download_delete(api, admin, fake_manager):
     assert (await api.get(f"/api/files/{f['id']}")).status_code == 404
 
 
-async def test_chunk_offset_mismatch_and_resume(api, admin):
-    r = await api.post("/api/uploads", json={"name": "x.bin", "size": 10})
-    up = r.json()
-    r = await api.put(f"/api/uploads/{up['id']}/chunk", content=b"12345", headers={"X-Chunk-Offset": "0"})
-    assert r.json()["received"] == 5
-    r = await api.put(f"/api/uploads/{up['id']}/chunk", content=b"12345", headers={"X-Chunk-Offset": "0"})
-    assert r.status_code == 409 and r.json()["detail"]["received"] == 5
+async def test_parallel_chunks_any_order_idempotent(api, admin, fake_manager):
+    """Chunks may arrive in any order and be repeated; hashing follows the
+    contiguous prefix so the digests are still exact."""
+    await api.put("/api/admin/settings", json={"part_size_mb": 1})
+    data = os.urandom(3 * CHUNK + 123)  # 4 chunks
+    up = (await api.post("/api/uploads", json={"name": "p.bin", "size": len(data)})).json()
+    assert up["parallel"] and up["total_chunks"] == 4 and up["missing_chunks"] == [0, 1, 2, 3]
+    send = lambda i: api.put(f"/api/uploads/{up['id']}/chunk", content=data[i * CHUNK:(i + 1) * CHUNK], headers={"X-Chunk-Offset": str(i * CHUNK)})
+    r = await send(2); assert r.status_code == 200 and r.json()["missing_chunks"] == [0, 1, 3]
+    r = await send(3); assert r.status_code == 200
+    r = await api.post(f"/api/uploads/{up['id']}/complete"); assert r.status_code == 400
+    r = await send(0); assert r.status_code == 200 and r.json()["received"] == 3 * CHUNK
+    r = await send(0); assert r.status_code == 200  # duplicate is fine
+    r = await api.put(f"/api/uploads/{up['id']}/chunk", content=b"x", headers={"X-Chunk-Offset": "7"})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_offset"
+    r = await api.put(f"/api/uploads/{up['id']}/chunk", content=b"x", headers={"X-Chunk-Offset": str(CHUNK)})
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "short_chunk"
+    r = await send(1); assert r.status_code == 200 and r.json()["missing_chunks"] == [] and r.json()["received"] == len(data)
+    # The resume listing shows it until completed.
+    assert [u["id"] for u in (await api.get("/api/uploads")).json()] == [up["id"]]
+    r = await api.post(f"/api/uploads/{up['id']}/complete", json={"sha256": hashlib.sha256(data).hexdigest()})
+    assert r.status_code == 200, r.text
+    assert (await api.get("/api/uploads")).json() == []
+    await _drain(transfer_worker.worker)
+    f = (await api.get(f"/api/files/{up['file_id']}")).json()
+    assert f["status"] == "ready" and f["sha256"] == hashlib.sha256(data).hexdigest()
+    assert fake_manager.stored_bytes() == data
+
+
+async def test_parallel_chunks_concurrently(api, admin, fake_manager):
+    """Real concurrency: all chunks in flight at once, like the browser does."""
+    import asyncio
+    data = os.urandom(9 * CHUNK + 1)
+    up = (await api.post("/api/uploads", json={"name": "c.bin", "size": len(data)})).json()
+    rs = await asyncio.gather(*[api.put(f"/api/uploads/{up['id']}/chunk", content=data[i * CHUNK:(i + 1) * CHUNK],
+                                        headers={"X-Chunk-Offset": str(i * CHUNK)}) for i in range(10)])
+    assert all(r.status_code == 200 for r in rs), [r.status_code for r in rs]
     r = await api.post(f"/api/uploads/{up['id']}/complete")
-    assert r.status_code == 400
-    r = await api.put(f"/api/uploads/{up['id']}/chunk", content=b"678901", headers={"X-Chunk-Offset": "5"})
-    assert r.status_code == 400  # exceeds declared size
-    r = await api.put(f"/api/uploads/{up['id']}/chunk", content=b"67890", headers={"X-Chunk-Offset": "5"})
-    assert r.status_code == 200
-    r = await api.post(f"/api/uploads/{up['id']}/complete")
-    assert r.status_code == 200 and r.json()["file"]["status"] == "queued"
-    assert r.json()["file"]["sha256"] == hashlib.sha256(b"1234567890").hexdigest()
+    assert r.status_code == 200, r.text
+    await _drain(transfer_worker.worker)
+    f = (await api.get(f"/api/files/{up['file_id']}")).json()
+    assert f["status"] == "ready" and f["sha256"] == hashlib.sha256(data).hexdigest()
+    assert fake_manager.stored_bytes() == data
 
 
 async def test_retry_after_failures(api, admin, fake_manager):
@@ -266,18 +297,18 @@ async def test_streaming_overlap_and_backpressure(api, admin, fake_manager):
     up = r.json()
     fid = up["file_id"]
     assert (await api.get(f"/api/files/{fid}")).json()["status"] == "receiving"
-    off, chunk, hit_backpressure = 0, 1024 * 1024, False
+    off, chunk, hit_backpressure = 0, CHUNK, False
     while off < len(data):
         r = await api.put(f"/api/uploads/{up['id']}/chunk", content=data[off:off + chunk],
                           headers={"X-Chunk-Offset": str(off)})
         if r.status_code == 429:
             hit_backpressure = True
             waiting = len([p for p in list(config.STAGING_DIR.glob(f"{fid}.p*"))])
-            assert waiting <= MAX_STAGED_PARTS
+            assert waiting <= MAX_STAGED_PARTS + 1
             assert await transfer_worker.worker.process_one()  # a part leaves for Telegram
             continue
         assert r.status_code == 200, r.text
-        off = r.json()["received"]
+        off += chunk
     assert hit_backpressure
     # Some parts are already in the channel before the browser finished.
     assert len(fake_manager.messages) >= MAX_STAGED_PARTS
@@ -301,8 +332,9 @@ async def test_cancel_receiving_upload_removes_channel_parts(api, admin, fake_ma
     await api.put("/api/admin/settings", json={"part_size_mb": 1})
     data = os.urandom(2 * 1024 * 1024)
     up = (await api.post("/api/uploads", json={"name": "c.bin", "size": len(data)})).json()
-    r = await api.put(f"/api/uploads/{up['id']}/chunk", content=data[:1024 * 1024], headers={"X-Chunk-Offset": "0"})
-    assert r.status_code == 200
+    for i in range(1024 * 1024 // CHUNK):
+        r = await api.put(f"/api/uploads/{up['id']}/chunk", content=data[i * CHUNK:(i + 1) * CHUNK], headers={"X-Chunk-Offset": str(i * CHUNK)})
+        assert r.status_code == 200
     assert await transfer_worker.worker.process_one()
     assert len(fake_manager.messages) == 1
     r = await api.delete(f"/api/uploads/{up['id']}")

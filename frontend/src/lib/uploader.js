@@ -6,22 +6,81 @@ import { createSHA256 } from 'hash-wasm'
 
 const MAX_TRIES = 5
 
-export async function uploadFile(file, { folderId = null, bundleId = null, path = null, memberIndex = null, onProgress, onStatus, signal } = {}) {
-  const init = await api('/api/uploads', {
-    method: 'POST', signal,
-    body: { name: file.name, size: file.size, mime_type: file.type || null, folder_id: folderId, bundle_id: bundleId, path, member_index: memberIndex },
-  })
+const PARALLEL = 3  // chunks in flight per file
+
+// Upload one file. Plain uploads (no bundle) use the parallel protocol: the
+// server keeps a bitmap of received chunks, so chunks go up several at a
+// time, retries are idempotent, and an interrupted upload resumes by sending
+// only what is missing (pass resumeId). Bundle members stay sequential.
+export async function uploadFile(file, { folderId = null, bundleId = null, path = null, memberIndex = null, resumeId = null, handle = null, onProgress, onStatus, signal } = {}) {
+  const init = resumeId
+    ? await api(`/api/uploads/${resumeId}`, { signal })
+    : await api('/api/uploads', {
+      method: 'POST', signal,
+      body: { name: file.name, size: file.size, mime_type: file.type || null, folder_id: folderId, bundle_id: bundleId, path, member_index: memberIndex },
+    })
+  if (init.parallel) return uploadParallel(file, init, { handle, onProgress, onStatus, signal })
+  return uploadSequential(file, init, { bundleId, onProgress, onStatus, signal })
+}
+
+async function uploadParallel(file, init, { handle, onProgress, onStatus, signal }) {
+  const { remember, forget } = await import('./resume')
+  await remember({ uploadId: init.id, fileId: init.file_id, name: file.name, size: file.size, lastModified: file.lastModified,
+    folderId: init.folder_id, handle: handle || null, createdAt: Date.now() })
+  const cs = init.chunk_size
+  const total = init.total_chunks
+  const missing = new Set(init.missing_chunks)
+  const hashing = init.part_size ? await makeHasher(init.part_size, file.size) : null
+  let received = init.received || 0
+  let inflight = 0
+  let failure = null
+  const waiters = []
+  const wake = () => { while (waiters.length && inflight < PARALLEL) waiters.shift()() }
+  const slot = () => new Promise((r) => { if (inflight < PARALLEL) r(); else waiters.push(r) })
+
+  const send = async (i, blob) => {
+    let tries = 0
+    for (;;) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      try {
+        const r = await api(`/api/uploads/${init.id}/chunk`, {
+          method: 'PUT', body: blob, signal, headers: { 'X-Chunk-Offset': String(i * cs), 'Content-Type': 'application/octet-stream' },
+        })
+        received = Math.max(received, r.received); onStatus?.('uploading'); onProgress?.(received, file.size)
+        return
+      } catch (e) {
+        if (signal?.aborted) throw e
+        if (e instanceof ApiError && e.status === 429 && e.detail?.code === 'backpressure') { onStatus?.('waiting'); await sleep((e.detail.retry_after || 2) * 1000); continue }
+        if (++tries >= MAX_TRIES) throw e
+        await sleep(1000 * tries)
+      }
+    }
+  }
+
+  const tasks = []
+  for (let i = 0; i < Math.max(total, 1) && i * cs < file.size; i++) {
+    if (failure) break
+    const blob = file.slice(i * cs, Math.min((i + 1) * cs, file.size))
+    if (hashing) await hashing.feed(i * cs, blob)   // sequential read keeps the digests in order
+    if (!missing.has(i)) continue
+    await slot(); inflight++
+    tasks.push(send(i, blob).catch((e) => { failure = failure || e }).finally(() => { inflight--; wake() }))
+  }
+  await Promise.all(tasks)
+  if (failure) throw failure
+  if (file.size === 0) onProgress?.(0, 0)
+  const digests = hashing ? await hashing.finish() : undefined
+  const result = await api(`/api/uploads/${init.id}/complete`, { method: 'POST', signal, body: digests })
+  await forget(init.id)
+  return result
+}
+
+async function uploadSequential(file, init, { bundleId, onProgress, onStatus, signal }) {
   const chunkSize = init.chunk_size
   let offset = init.received || 0
   let tries = 0
-  // Hash while we read: whole file plus one digest per server part, so the
-  // server can prove nothing was corrupted in transit and keep the whole-file
-  // digest even if it restarted mid-upload. Only for fresh plain uploads
-  // (a resumed upload has already sent bytes we cannot re-hash).
-  const hashing = !bundleId && offset === 0 && init.part_size ? await makeHasher(init.part_size, file.size) : null
   while (offset < file.size) {
     const blob = file.slice(offset, Math.min(offset + chunkSize, file.size))
-    if (hashing) await hashing.feed(offset, blob)
     try {
       const r = await api(`/api/uploads/${init.id}/chunk`, {
         method: 'PUT', body: blob, signal,
@@ -35,19 +94,19 @@ export async function uploadFile(file, { folderId = null, bundleId = null, path 
       if (signal?.aborted) throw e
       if (e instanceof ApiError && e.status === 409 && e.detail?.received != null) { offset = e.detail.received; continue }
       if (e instanceof ApiError && e.status === 429 && e.detail?.code === 'backpressure') {
-        // Staging is full: the server is still pushing earlier parts to Telegram.
         onStatus?.('waiting')
-        await new Promise(r => setTimeout(r, (e.detail.retry_after || 2) * 1000))
+        await sleep((e.detail.retry_after || 2) * 1000)
         continue
       }
       if (++tries >= MAX_TRIES) throw e
-      await new Promise(r => setTimeout(r, 1000 * tries))
+      await sleep(1000 * tries)
     }
   }
   if (file.size === 0) onProgress?.(0, 0)
-  const digests = hashing ? await hashing.finish() : undefined
-  return api(`/api/uploads/${init.id}/complete`, { method: 'POST', signal, body: digests })
+  return api(`/api/uploads/${init.id}/complete`, { method: 'POST', signal })
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function makeHasher(partSize, size) {
   const whole = await createSHA256()
@@ -167,6 +226,17 @@ export function rootFolderName(items) {
 // File System Access API (Chrome/Edge): window.showDirectoryPicker() hands us a
 // directory handle. Walking it ourselves avoids the browser having to enumerate
 // the whole tree before its confirmation dialog, and lets us show progress.
+export function supportsFilePicker() {
+  return typeof window !== 'undefined' && typeof window.showOpenFilePicker === 'function' && window.isSecureContext
+}
+
+// Pick files with the File System Access API so their handles can be
+// remembered for resuming after a browser restart. Returns [{file, handle}].
+export async function pickFilesWithHandles() {
+  const handles = await window.showOpenFilePicker({ multiple: true })
+  return Promise.all(handles.map(async (handle) => ({ file: await handle.getFile(), handle })))
+}
+
 export function supportsDirectoryPicker() {
   return typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function' && window.isSecureContext
 }

@@ -28,9 +28,11 @@ browser ──chunked, resumable──▶ part staging ──worker──▶ Tel
   message and downloads without limit, so the same bot token you get from
   BotFather is enough. You also need an API id/hash from
   [my.telegram.org](https://my.telegram.org/apps).
-* **Streaming pipeline.** The browser sends chunks into per-part staging
-  files; the moment a part (default 512 MB, max 1990 MB) is complete it goes to
-  Telegram while the next part is still arriving. Staging holds at most a few
+* **Streaming pipeline.** The browser sends chunks, several at a time and in
+  any order, into per-part staging files; the moment a part (default 512 MB,
+  max 1990 MB) is complete it goes to Telegram while the next part is still
+  arriving. An interrupted upload resumes with only the missing chunks, even
+  after a browser restart (one click on Chrome/Edge, re-pick the file elsewhere). Staging holds at most a few
   parts, so a 60 GB file needs about 1.5 GB of disk, and the total time is the
   slower hop rather than the sum of both. Parts are hashed as they arrive.
 * **Split and zip.** Large files become `name.ext.001`, `name.ext.002`, … one
@@ -116,6 +118,7 @@ For frontend development run `npm run dev` (proxies `/api` to port 8000).
 | `OTS_COOKIE_SECURE` | auto | Force the Secure cookie flag on/off |
 | `OTS_TRUSTED_PROXY_COUNT` | `0` | Reverse proxies in front of the app |
 | `OTS_DEFAULT_PART_SIZE_MB` | `512` | Initial part size; change later in Settings |
+| `OTS_UPLOAD_CHUNK_SIZE` | `8388608` | Browser→server chunk in bytes; fixed per install, do not change with uploads in flight |
 | `OTS_IMPORT_DIR` | `data/import` (`/import` in Docker) | Server-side import mount |
 | `OTS_LOG_LEVEL` | `INFO` | Python log level |
 
@@ -125,7 +128,6 @@ size); the upload is refused otherwise.
 ## Roadmap
 
 - Optional encryption of parts (AES-GCM) so Telegram never holds readable bytes.
-- Parallel chunk uploads from the browser and resume across browser restarts.
 - Stale-upload cleanup and staging usage in Settings.
 - Status panel, TOTP two-factor login, expiring share links.
 - User-account (phone) login for 4 GB parts with Telegram Premium.
