@@ -21,6 +21,8 @@ from app.transfers.staging import part_path
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 2.0
+RECONNECT_INTERVAL = 60.0
+CLEANUP_INTERVAL = 10 * 60.0
 
 
 class Progress:
@@ -96,9 +98,25 @@ class TransferWorker:
     async def run(self) -> None:
         # Anything left mid-flight by a previous process goes back to the queue.
         await self._recover_stale()
+        loop = asyncio.get_event_loop()
+        next_reconnect = loop.time() + RECONNECT_INTERVAL
+        next_cleanup = loop.time() + 60.0
         while not self._stop.is_set():
             worked = False
             try:
+                now = loop.time()
+                if now >= next_reconnect:
+                    next_reconnect = now + RECONNECT_INTERVAL
+                    if getattr(self.manager, "needs_reconnect", lambda: False)():
+                        logger.info("Telegram is configured but offline; reconnecting")
+                        try:
+                            await self.manager.reconnect()
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("Telegram reconnect failed: %s", e)
+                if now >= next_cleanup:
+                    next_cleanup = now + CLEANUP_INTERVAL
+                    from app import maintenance
+                    await maintenance.cleanup(self.manager)
                 if self.manager.ready():
                     worked = await self.process_one()
             except Exception:  # noqa: BLE001

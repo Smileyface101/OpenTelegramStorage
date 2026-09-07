@@ -50,6 +50,11 @@ browser ──chunked, resumable──▶ part staging ──worker──▶ Tel
 * **Import from the server.** Mount a directory at `/import` and send files
   or whole folders from it straight to the channel: no browser, no copy, read
   in place. Folders go in as a streamed zip or as a tree.
+* **Housekeeping.** Uploads nobody resumed for 72 hours (configurable) are
+  removed along with any parts that reached the channel; orphaned staging
+  files are swept. Settings → System shows Telegram, worker, queue, staging
+  and disk state, recent warnings, and offers reconnect and cleanup buttons.
+  A configured-but-offline Telegram connection is retried every minute.
 * **Real delete.** Deleting a file deletes the channel messages, not just the
   index row.
 * **Self-describing channel.** Every part carries a JSON caption with the file
@@ -128,8 +133,8 @@ size); the upload is refused otherwise.
 ## Roadmap
 
 - Optional encryption of parts (AES-GCM) so Telegram never holds readable bytes.
-- Stale-upload cleanup and staging usage in Settings.
-- Status panel, TOTP two-factor login, expiring share links.
+- TOTP two-factor login and a session list.
+- Expiring share links.
 - User-account (phone) login for 4 GB parts with Telegram Premium.
 
 ## Development

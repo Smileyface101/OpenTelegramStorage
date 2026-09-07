@@ -12,6 +12,7 @@ DEFAULTS: dict[str, str] = {
     "transfer.max_retries": str(config.MAX_UPLOAD_RETRIES),
     "transfer.compress_archives": "false",
     "transfer.upload_connections": "4",
+    "transfer.stale_upload_hours": "72",
 }
 
 
@@ -66,6 +67,7 @@ async def public_settings(db: AsyncSession) -> dict:
         "max_part_size_mb": config.MAX_PART_SIZE_MB,
         "max_retries": await get_int(db, "transfer.max_retries", config.MAX_UPLOAD_RETRIES),
         "upload_connections": max(1, min(16, await get_int(db, "transfer.upload_connections", 4))),
+        "stale_upload_hours": await get_int(db, "transfer.stale_upload_hours", 72),
     }
 
 

@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import asyncio
 
-from app import config, recovery, security, settings_store
+from app import config, maintenance, recovery, security, settings_store, status as status_mod
 from app.transfers import importer
 from app.telegram.manager import manager
 from app.db import get_db
@@ -34,6 +34,8 @@ async def update_settings(data: SettingsUpdate, db: AsyncSession = Depends(get_d
         await settings_store.set(db, "transfer.compress_archives", "true" if data.compress_archives else "false")
     if data.upload_connections is not None:
         await settings_store.set(db, "transfer.upload_connections", str(data.upload_connections))
+    if data.stale_upload_hours is not None:
+        await settings_store.set(db, "transfer.stale_upload_hours", str(data.stale_upload_hours))
     await db.commit()
     return await settings_store.public_settings(db)
 
@@ -153,3 +155,15 @@ async def import_start(data: ImportRequest, db: AsyncSession = Depends(get_db), 
         importer.launch(f.id)
     transfer_worker.kick()
     return {"files": [file_out(f) for f in files], "count": len(files)}
+
+
+@router.get("/status")
+async def system_status(user: User = Depends(security.current_admin)):
+    from app.transfers import worker as transfer_worker
+    return await status_mod.snapshot(manager, transfer_worker.worker)
+
+
+@router.post("/maintenance/cleanup")
+async def run_cleanup(user: User = Depends(security.current_admin)):
+    """Remove abandoned uploads and orphaned staging files now."""
+    return await maintenance.cleanup(manager)

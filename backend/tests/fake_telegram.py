@@ -2,8 +2,12 @@
 from typing import AsyncIterator
 
 
+from app.telegram.manager import TelegramStatus
+
+
 class FakeManager:
     def __init__(self) -> None:
+        self.status = TelegramStatus(configured=True, connected=True, bot_username="fake_bot", channel_id=-1001, channel_title="Fake")
         self.messages: dict[int, tuple[str, bytes, dict]] = {}
         self.deleted: list[int] = []
         self._next = 100

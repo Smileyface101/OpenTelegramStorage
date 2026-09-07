@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { get, post, put, del } from '../lib/api'
+import { bytes, when } from '../lib/format'
 import { Alert } from '../components/ui'
 import { BotStep, ChannelStep } from './Setup'
 
@@ -7,6 +8,7 @@ export default function Settings({ user, onChange }) {
   const isAdmin = user?.role === 'admin'
   return (
     <div className="space-y-6 max-w-2xl">
+      {isAdmin && <SystemSection onChange={onChange} />}
       {isAdmin && <TelegramSection onChange={onChange} />}
       {isAdmin && <TransferSection />}
       {isAdmin && <RecoverySection />}
@@ -55,7 +57,7 @@ function TransferSection() {
   useEffect(() => { get('/api/admin/settings').then(setS) }, [])
   const save = async (e) => {
     e.preventDefault(); setMsg(''); setError('')
-    try { setS(await put('/api/admin/settings', { part_size_mb: Number(s.part_size_mb), max_retries: Number(s.max_retries), upload_connections: Number(s.upload_connections) })); setMsg('Saved') } catch (err) { setError(err.message) }
+    try { setS(await put('/api/admin/settings', { part_size_mb: Number(s.part_size_mb), max_retries: Number(s.max_retries), upload_connections: Number(s.upload_connections), stale_upload_hours: Number(s.stale_upload_hours) })); setMsg('Saved') } catch (err) { setError(err.message) }
   }
   if (!s) return null
   return (
@@ -71,9 +73,64 @@ function TransferSection() {
         <div><label className="label">Parallel upload connections (1–16)</label>
           <input className="input" type="number" min="1" max="16" value={s.upload_connections} onChange={(e) => setS({ ...s, upload_connections: e.target.value })} />
           <p className="text-xs text-ink-400 mt-1">Files over 10 MB are pushed to Telegram over this many connections at once. 4 is a good default; 1 uses the classic single-connection uploader.</p></div>
+        <div><label className="label">Remove abandoned uploads after (hours, 0 = never)</label>
+          <input className="input" type="number" min="0" value={s.stale_upload_hours} onChange={(e) => setS({ ...s, stale_upload_hours: e.target.value })} />
+          <p className="text-xs text-ink-400 mt-1">An upload nobody resumed for this long is deleted: its staging files, its rows, and any parts that already reached the channel. Runs every 10 minutes.</p></div>
         <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
         <button className="btn-primary">Save</button>
       </form>
+    </Section>
+  )
+}
+
+function Stat({ label, value, sub, warn }) {
+  return (
+    <div className={`rounded-lg border p-3 ${warn ? 'border-amber-500/40 bg-amber-500/5' : 'border-ink-800 bg-ink-950/40'}`}>
+      <div className="text-[11px] uppercase tracking-wide text-ink-400">{label}</div>
+      <div className="text-sm font-medium mt-0.5">{value}</div>
+      {sub && <div className="text-xs text-ink-400 mt-0.5">{sub}</div>}
+    </div>
+  )
+}
+
+function SystemSection({ onChange }) {
+  const [st, setSt] = useState(null)
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+  const load = async () => { try { setSt(await get('/api/admin/status')) } catch (e) { setError(e.message) } }
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t) }, [])
+  const act = async (label, fn) => { setBusy(label); setError(''); try { await fn(); await load(); onChange?.() } catch (e) { setError(e.message) } finally { setBusy('') } }
+  if (!st) return <Section title="System">{error ? <Alert>{error}</Alert> : <div className="text-sm text-ink-400">Loading…</div>}</Section>
+  const tg = st.telegram; const w = st.worker; const sg = st.staging
+  const inFlight = Object.entries(w.in_flight || {})
+  const pct = sg.total_bytes ? Math.round((sg.total_bytes - sg.free_bytes) / sg.total_bytes * 100) : 0
+  const uptime = st.uptime_seconds; const up = uptime >= 86400 ? `${Math.floor(uptime / 86400)}d ${Math.floor(uptime % 86400 / 3600)}h` : uptime >= 3600 ? `${Math.floor(uptime / 3600)}h ${Math.floor(uptime % 3600 / 60)}m` : `${Math.floor(uptime / 60)}m`
+  return (
+    <Section title="System">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        <Stat label="Telegram" warn={!tg.connected || !tg.channel} value={tg.connected ? `connected as @${tg.bot_username}` : (tg.configured ? 'offline' : 'not set up')} sub={tg.channel ? tg.channel.title : 'no channel'} />
+        <Stat label="Worker" warn={!w.alive} value={w.alive ? 'running' : 'stopped'} sub={inFlight.length ? `sending part ${inFlight[0][1].part_index + 1}` : 'idle'} />
+        <Stat label="Queue" value={`${w.files_by_status.receiving + w.files_by_status.queued + w.files_by_status.uploading} waiting`} sub={`${w.files_by_status.failed} failed · ${w.files_by_status.ready} ready`} warn={w.files_by_status.failed > 0} />
+        <Stat label="In channel" value={bytes(w.bytes_in_channel)} sub={`${w.files_by_status.ready} files`} />
+        <Stat label="Staging" warn={sg.free_bytes < 2 * 1024 ** 3} value={`${bytes(sg.used_bytes)} in ${sg.file_count} file${sg.file_count === 1 ? '' : 's'}`} sub={`${bytes(sg.free_bytes)} free of ${bytes(sg.total_bytes)} (${pct}% used)`} />
+        <Stat label="App" value={`v${st.version} · up ${up}`} sub={`db ${bytes(st.database.size_bytes)} · ${st.uploads.active_sessions} open upload${st.uploads.active_sessions === 1 ? '' : 's'}`} />
+      </div>
+      {tg.error && <Alert>Telegram: {tg.error}</Alert>}
+      <div className="flex flex-wrap gap-2">
+        {tg.configured && <button className="btn-ghost" disabled={!!busy} onClick={() => act('tg', () => post('/api/telegram/reconnect'))}>{busy === 'tg' ? 'Reconnecting…' : 'Reconnect Telegram'}</button>}
+        <button className="btn-ghost" disabled={!!busy} onClick={() => act('clean', () => post('/api/admin/maintenance/cleanup'))}>{busy === 'clean' ? 'Cleaning…' : 'Run cleanup now'}</button>
+        <span className="text-xs text-ink-400 self-center">{st.last_cleanup ? `Last cleanup ${when(st.last_cleanup.at)}: ${st.last_cleanup.stale_uploads + st.last_cleanup.stale_bundles + st.last_cleanup.stale_receiving_files} stale, ${st.last_cleanup.orphan_files_removed} orphan file(s), ${bytes(st.last_cleanup.orphan_bytes_freed)} freed` : 'Cleanup has not run yet'}</span>
+      </div>
+      {st.import.enabled ? <p className="text-xs text-ink-400">Import directory: {st.import.dir}</p> : <p className="text-xs text-ink-400">No import directory mounted ({st.import.dir}).</p>}
+      <details>
+        <summary className="cursor-pointer text-sm text-ink-300">Recent warnings and errors ({st.recent_errors.length})</summary>
+        {st.recent_errors.length === 0 ? <div className="text-xs text-ink-400 mt-2">None since start.</div> : (
+          <ul className="mt-2 max-h-56 overflow-auto rounded-lg bg-ink-950 p-2 text-xs space-y-1">
+            {st.recent_errors.map((e, i) => <li key={i} className="font-mono"><span className="text-ink-500">{when(e.at)}</span> <span className={e.level === 'ERROR' ? 'text-red-300' : 'text-amber-300'}>{e.level}</span> <span className="text-ink-400">{e.logger}</span> {e.message}</li>)}
+          </ul>
+        )}
+      </details>
+      <Alert>{error}</Alert>
     </Section>
   )
 }

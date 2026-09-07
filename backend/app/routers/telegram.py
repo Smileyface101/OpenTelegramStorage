@@ -56,3 +56,10 @@ async def select_channel(data: ChannelSelect, user: User = Depends(security.curr
 async def disconnect(user: User = Depends(security.current_admin)):
     await manager.disconnect_and_forget()
     return status_out()
+
+
+@router.post("/reconnect")
+async def reconnect(user: User = Depends(security.current_admin)):
+    """Drop the current MTProto session and connect again with the stored credentials."""
+    await manager.reconnect()
+    return status_out()

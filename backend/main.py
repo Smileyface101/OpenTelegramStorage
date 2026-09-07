@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import __version__, config, db as _db, security
+from app import __version__, config, db as _db, security, status as status_mod
 from app.routers import admin, auth, files, setup, telegram, transfers, uploads
 from app.telegram.manager import manager
 from app.transfers import worker as transfer_worker
@@ -16,6 +16,7 @@ from app.transfers import worker as transfer_worker
 logging.basicConfig(level=os.getenv("OTS_LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ots")
+status_mod.install_log_capture()
 
 CSRF_EXEMPT = ("/api/auth/login", "/api/setup/admin")
 

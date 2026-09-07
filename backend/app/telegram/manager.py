@@ -102,6 +102,14 @@ class TelegramManager:
             self.status.channel_title = None
             return self.status
 
+    async def reconnect(self) -> None:
+        async with self._lock:
+            await self._disconnect()
+            await self.load_from_settings()
+
+    def needs_reconnect(self) -> bool:
+        return self.status.configured and not self.status.connected
+
     async def disconnect_and_forget(self) -> None:
         async with self._lock:
             await self._disconnect()

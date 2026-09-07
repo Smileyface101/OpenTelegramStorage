@@ -103,6 +103,7 @@ class SettingsUpdate(BaseModel):
     max_retries: int | None = Field(default=None, ge=0, le=20)
     compress_archives: bool | None = None
     upload_connections: int | None = Field(default=None, ge=1, le=16)
+    stale_upload_hours: int | None = Field(default=None, ge=0, le=24 * 365)
 
 
 class UploadComplete(BaseModel):
