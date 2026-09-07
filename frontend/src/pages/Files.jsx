@@ -6,6 +6,8 @@ import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataT
 import { bytes, when, pct } from '../lib/format'
 import { Modal, Alert, Progress, StatusBadge } from '../components/ui'
 
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`)
+
 export default function Files() {
   const [params, setParams] = useSearchParams()
   const folderId = params.get('folder') ? Number(params.get('folder')) : null
@@ -42,12 +44,29 @@ export default function Files() {
   }
 
   const startFolder = (items) => {
-    if (!items.length) return
+    if (!items.length) { setError('The selected folder contains no files (or the browser did not grant access to it).'); return }
     setModal({ type: 'folder-upload', items, root: rootFolderName(items) || 'folder' })
   }
 
+  const onPickFolder = (e) => {
+    try {
+      const list = e.target.files
+      console.info('[otg] folder picker returned', list?.length, 'files')
+      startFolder(itemsFromFileList(list))
+    } catch (err) {
+      console.error('[otg] folder picker failed', err)
+      setError(`Could not read the folder: ${err.message}`)
+    } finally { e.target.value = '' }
+  }
+
+  const openFolderPicker = () => {
+    const el = dirInput.current
+    if (!el || !('webkitdirectory' in el)) { setError('This browser cannot pick folders. Drag the folder onto the page instead, or zip it and upload the file.'); return }
+    el.click()
+  }
+
   const track = (name, size) => {
-    const id = crypto.randomUUID()
+    const id = uuid()
     const ctrl = new AbortController()
     setUploads((u) => [...u, { id, name, size, done: 0, ctrl }])
     const onProgress = (d) => setUploads((u) => u.map((x) => x.id === id ? { ...x, done: d } : x))
@@ -93,6 +112,7 @@ export default function Files() {
     e.preventDefault(); setDragging(false)
     try {
       const { items, hadDirectory } = await itemsFromDataTransfer(e.dataTransfer)
+      console.info('[otg] drop:', items.length, 'files, directory =', hadDirectory)
       if (hadDirectory) startFolder(items)
       else startUploads(items.map((it) => it.file))
     } catch (err) { setError(err.message) }
@@ -123,10 +143,10 @@ export default function Files() {
         </div>
         <button className="btn-ghost" onClick={() => setModal({ type: 'folder' })}><FolderPlus size={16} /> Folder</button>
         <button className="btn-ghost" title="Pick several files; they are zipped into one archive on the server before going to Telegram" onClick={() => { fileInput.current.dataset.zip = '1'; fileInput.current.click() }}><Archive size={16} /> Files as zip</button>
-        <button className="btn-ghost" title="Pick a whole folder (all subfolders included)" onClick={() => dirInput.current.click()}><FolderUp size={16} /> Upload folder</button>
+        <button className="btn-ghost" title="Pick a whole folder (all subfolders included)" onClick={openFolderPicker}><FolderUp size={16} /> Upload folder</button>
         <button className="btn-primary" onClick={() => { fileInput.current.dataset.zip = ''; fileInput.current.click() }}><Upload size={16} /> Upload files</button>
         <input ref={fileInput} type="file" multiple hidden onChange={(e) => { startUploads(Array.from(e.target.files), e.target.dataset.zip === '1'); e.target.value = '' }} />
-        <input ref={dirInput} type="file" webkitdirectory="" directory="" multiple hidden onChange={(e) => { startFolder(itemsFromFileList(e.target.files)); e.target.value = '' }} />
+        <input ref={dirInput} type="file" webkitdirectory="" directory="" multiple hidden onChange={onPickFolder} />
       </div>
 
       <Alert>{error && <span className="flex justify-between">{error}<button onClick={() => setError('')}>✕</button></span>}</Alert>
