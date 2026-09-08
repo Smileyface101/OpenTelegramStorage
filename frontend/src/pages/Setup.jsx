@@ -133,6 +133,7 @@ export function ChannelStep({ onDone, onBack }) {
           <li>Open the channel → tap its name → <i>Administrators</i> → <i>Add Administrator</i> → search for <code>@{status?.bot_username || 'your_bot'}</code> and select it.</li>
           <li>Leave the permissions at their defaults; the bot needs at least <b>Post messages</b> and <b>Delete messages</b>. Save.</li>
           <li>Post any message in the channel (a single "hi" is enough). That post is how the bot learns the channel exists; it appears in the list below within a few seconds.</li>
+          <li><b>Make sure "Auto-delete messages" is Off</b> in the channel settings. With it on, Telegram erases your files after the chosen period. The app checks this and refuses to continue while it is on.</li>
         </ol>
       </Guide>
       <Guide title="Good to know" open={false}>
@@ -157,10 +158,17 @@ export function ChannelStep({ onDone, onBack }) {
         </div>
       </details>
       <Alert>{error}</Alert>
-      {status?.channel && <Alert kind="ok">Current channel: {status.channel.title}</Alert>}
+      {status?.channel && !status.auto_delete_seconds && <Alert kind="ok">Current channel: {status.channel.title}. Auto-delete is off.</Alert>}
+      {status?.channel && status.auto_delete_seconds > 0 && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200 space-y-2">
+          <div><b>This channel deletes messages automatically after {Math.round(status.auto_delete_seconds / 86400) || 1} day(s).</b> Every file you store would be destroyed after that time.</div>
+          <div>In Telegram: open the channel → tap its name → <i>Auto-delete messages</i> (or the timer icon) → <b>Off</b>. Then press Re-check.</div>
+          <button className="btn-ghost" onClick={async () => { setBusy(true); try { setStatus(await post('/api/telegram/recheck')) } finally { setBusy(false) } }} disabled={busy}>Re-check</button>
+        </div>
+      )}
       <div className="flex gap-2">
         {onBack && <button className="btn-ghost" onClick={onBack}>Back</button>}
-        {status?.channel && <button className="btn-primary" onClick={onDone}>Continue</button>}
+        {status?.channel && !status.auto_delete_seconds && <button className="btn-primary" onClick={onDone}>Continue</button>}
       </div>
     </div>
   )

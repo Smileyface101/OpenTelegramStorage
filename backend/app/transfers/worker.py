@@ -151,6 +151,8 @@ class TransferWorker:
                     await _sync.publish_layout(self.manager, f"{name}/system")
                 if now >= next_reconcile and self.manager.ready():
                     next_reconcile = now + SYNC_RECONCILE_INTERVAL
+                    if hasattr(self.manager, "check_auto_delete"):
+                        await self.manager.check_auto_delete()
                     from app import sync
                     await sync.reconcile(self.manager)
                 if self.manager.ready():

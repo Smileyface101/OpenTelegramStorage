@@ -34,6 +34,12 @@ export default function Layout({ user, onLogout, setup }) {
         </div>
       </aside>
       <main className="flex-1 p-4 md:p-8 max-w-6xl w-full mx-auto">
+        {setup?.channel_auto_delete_seconds && (
+          <div className="mb-4 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            <b>Your channel has auto-delete turned on ({Math.round(setup.channel_auto_delete_seconds / 86400) || 1} day{setup.channel_auto_delete_seconds >= 172800 ? 's' : ''}).</b> Telegram will destroy every stored file after that time. Open the channel in Telegram → channel settings → <i>Auto-delete messages</i> → <b>Off</b>, then reload this page.
+            {user?.role === 'admin' && <Link to="/settings" className="underline ml-1">Settings</Link>}
+          </div>
+        )}
         {!tgOk && (
           <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
             <AlertTriangle size={16} /> Telegram is not fully configured. Uploads will queue until it is.

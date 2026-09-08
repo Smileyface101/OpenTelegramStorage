@@ -54,7 +54,7 @@ async def snapshot(manager, worker) -> dict:
         "uptime_seconds": int(time.monotonic() - _t0),
         "telegram": {"configured": st.configured, "connected": st.connected, "bot_username": st.bot_username,
                      "channel": ({"id": st.channel_id, "title": st.channel_title} if st.channel_id else None),
-                     "error": st.error},
+                     "error": st.error, "auto_delete_seconds": st.auto_delete_seconds},
         "worker": {"alive": bool(task and not task.done()), "in_flight": progress.active, "files_by_status": counts,
                    "bytes_in_channel": int(stored or 0)},
         "uploads": {"active_sessions": sessions or 0, "stale_after_hours": stale_hours},

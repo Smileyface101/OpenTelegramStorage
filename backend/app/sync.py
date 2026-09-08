@@ -392,10 +392,19 @@ async def catch_up(manager) -> dict:
     return summary
 
 
+_missing_seen: dict[str, datetime] = {}   # file id -> first time its messages were not found
+RECONCILE_CONFIRM_AFTER = 3600.0          # seconds a file must stay missing before removal
+RECONCILE_MAX_MISSING_FRACTION = 0.5      # more than this in one pass = fetch problem, not deletions
+
+
 async def reconcile(manager) -> dict:
     """Drop files whose channel messages are gone (deleted on another server
-    while we were offline, or deleted by hand in Telegram)."""
-    summary = {"checked": 0, "removed": 0}
+    while we were offline, or deleted by hand in Telegram).
+
+    Guarded so a bad read can never empty the index: a file is removed only
+    if it is missing on two passes at least an hour apart, and a pass in which
+    more than half of everything is missing is treated as a fetch failure."""
+    summary = {"checked": 0, "missing": 0, "removed": 0, "skipped": None}
     async with _db.async_session() as db:
         if not await settings_store.shared_mode(db):
             return summary
@@ -412,15 +421,30 @@ async def reconcile(manager) -> dict:
                 if mid not in present:
                     gone.add(by_msg[mid])
         status["last_reconcile_at"] = datetime.utcnow().isoformat()
+        all_files = {fid for fid in by_msg.values()}
+        summary["missing"] = len(gone)
+        if ids and len(gone) > RECONCILE_MAX_MISSING_FRACTION * len(all_files) and len(gone) > 1:
+            summary["skipped"] = "too many missing at once; treating as a fetch problem"
+            status["last_error"] = f"reconcile: {len(gone)} of {len(all_files)} files not found; not removing anything"
+            logger.warning("sync reconcile: %s", status["last_error"])
+            return summary
+        now = datetime.utcnow()
+        for fid in list(_missing_seen):
+            if fid not in gone:
+                _missing_seen.pop(fid, None)   # it is back (or was already removed)
         for fid in gone:
             f = await db.get(File, fid, options=[selectinload(File.parts)])
-            if f is None or f.status in (FileStatus.RECEIVING, FileStatus.QUEUED, FileStatus.UPLOADING, FileStatus.HASHING):
-                continue  # our own in-flight upload: parts legitimately absent
+            if f is None or f.status in (FileStatus.RECEIVING, FileStatus.QUEUED, FileStatus.UPLOADING, FileStatus.HASHING, FileStatus.SYNCING):
+                continue  # in flight: parts legitimately absent
+            first = _missing_seen.setdefault(fid, now)
+            if (now - first).total_seconds() < RECONCILE_CONFIRM_AFTER:
+                continue  # wait for a second confirmation
             from app.transfers.staging import remove_part_files
             remove_part_files(f.parts)
             await db.delete(f)
+            _missing_seen.pop(fid, None)
             summary["removed"] += 1
-            logger.info("sync reconcile: %s (%s) no longer in the channel; removed", fid, f.name)
+            logger.info("sync reconcile: %s (%s) missing from the channel for over an hour; removed", fid, f.name)
         await db.commit()
         if summary["removed"]:
             bump()

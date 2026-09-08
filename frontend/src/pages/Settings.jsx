@@ -50,6 +50,7 @@ function TelegramSection({ onChange }) {
       <dl className="grid grid-cols-3 gap-y-1 text-sm">
         <dt className="text-ink-400">Bot</dt><dd className="col-span-2">{status.connected ? `@${status.bot_username}` : (status.configured ? 'configured, offline' : 'not connected')}</dd>
         <dt className="text-ink-400">Channel</dt><dd className="col-span-2">{status.channel ? `${status.channel.title} (${status.channel.id})` : 'not selected'}</dd>
+        {status.channel && <><dt className="text-ink-400">Auto-delete</dt><dd className={`col-span-2 ${status.auto_delete_seconds ? 'text-red-300 font-medium' : 'text-emerald-300'}`}>{status.auto_delete_seconds ? `ON (${Math.round(status.auto_delete_seconds / 86400) || 1} day(s)) — turn it off in Telegram, files are being destroyed` : 'off'}</dd></>}
       </dl>
       <div className="flex flex-wrap gap-2">
         <button className="btn-ghost" onClick={() => setMode(mode === 'bot' ? null : 'bot')}>{status.configured ? 'Change bot' : 'Connect bot'}</button>

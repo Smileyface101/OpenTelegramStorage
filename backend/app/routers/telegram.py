@@ -21,6 +21,7 @@ def status_out() -> dict:
         "configured": st.configured, "connected": st.connected, "error": st.error,
         "bot_username": st.bot_username, "bot_id": st.bot_id,
         "channel": ({"id": st.channel_id, "title": st.channel_title} if st.channel_id else None),
+        "auto_delete_seconds": st.auto_delete_seconds,
         "discovered": [{"chat_id": c.chat_id, "title": c.title} for c in manager.discovered()],
     }
 
@@ -81,3 +82,10 @@ async def reveal_credentials(data: KeyExport, db: AsyncSession = Depends(get_db)
         "channel_id": await settings_store.get(db, "telegram.channel_id"),
         "channel_title": await settings_store.get(db, "telegram.channel_title"),
     }
+
+
+@router.post("/recheck")
+async def recheck(user: User = Depends(security.current_user)):
+    """Re-read the channel's auto-delete setting (after the user turned it off)."""
+    await manager.check_auto_delete()
+    return status_out()

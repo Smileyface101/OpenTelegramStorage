@@ -43,7 +43,10 @@ The setup wizard walks you through them step by step:
 
 1. A **bot token** from [@BotFather](https://t.me/BotFather) (`/newbot`).
 2. An **API id and hash** from [my.telegram.org/apps](https://my.telegram.org/apps).
-3. A **private channel** with the bot added as an administrator.
+3. A **private channel** with the bot added as an administrator, and
+   **"Auto-delete messages" switched off** in that channel. With it on,
+   Telegram erases your files after the chosen period; the app checks and
+   warns, but it cannot turn it off for you.
 
 Then run the app. With Docker:
 

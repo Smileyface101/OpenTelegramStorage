@@ -93,6 +93,12 @@ async def test_delete_event_and_reconcile(api, admin, fake_manager):
         await sync.handle_post(mid, json.dumps(cap), size)
     for mid, _c, _s in ids2:
         fake_manager.messages.pop(mid)
+    # One file of one is >50% missing -> treated as a fetch problem unless it is a single file.
+    res = await sync.reconcile(fake_manager)
+    assert res["missing"] == 1 and res["removed"] == 0  # first sighting: wait for confirmation
+    assert (await api.get(f"/api/files/{fid2}")).status_code == 200
+    from datetime import datetime, timedelta
+    sync._missing_seen[fid2] = datetime.utcnow() - timedelta(hours=2)
     res = await sync.reconcile(fake_manager)
     assert res["removed"] == 1
     assert (await api.get(f"/api/files/{fid2}")).status_code == 404
@@ -275,3 +281,24 @@ async def test_revision_and_startup_handshake(api, admin, fake_manager):
     assert "hello" in kinds and "tree" in kinds
     st = (await api.get("/api/admin/status")).json()["sync"]
     assert st["mode"] == "shared" and st["server_id"] and st["last_catchup_at"]
+
+
+
+async def test_reconcile_refuses_mass_removal(api, admin, fake_manager):
+    """If a fetch returns nothing (transient failure), nothing may be deleted."""
+    await api.put("/api/admin/settings", json={"workspace_mode": "shared", "workspace_name": "home"})
+    fids = []
+    for n in range(4):
+        fid, ids = _other_server_uploads(fake_manager, f"f{n}.bin", b"x" * 100, 100)
+        for mid, cap, size in ids:
+            await sync.handle_post(mid, json.dumps(cap), size)
+        fids.append(fid)
+    saved = dict(fake_manager.messages); fake_manager.messages.clear()   # everything "missing"
+    from datetime import datetime, timedelta
+    for fid in fids:
+        sync._missing_seen[fid] = datetime.utcnow() - timedelta(hours=2)
+    res = await sync.reconcile(fake_manager)
+    assert res["removed"] == 0 and res["skipped"]
+    for fid in fids:
+        assert (await api.get(f"/api/files/{fid}")).status_code == 200
+    fake_manager.messages.update(saved)

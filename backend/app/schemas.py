@@ -17,6 +17,7 @@ class SetupStatus(BaseModel):
     telegram_connected: bool
     channel_configured: bool
     workspace_mode: str | None = None
+    channel_auto_delete_seconds: int | None = None
     version: str
 
 

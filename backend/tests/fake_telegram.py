@@ -17,6 +17,9 @@ class FakeManager:
     def ready(self) -> bool:
         return self.is_ready
 
+    async def check_auto_delete(self):
+        return self.status.auto_delete_seconds
+
     async def upload_part(self, stream, size, file_name, caption, progress=None, connections=1):
         if self.fail_next > 0:
             self.fail_next -= 1

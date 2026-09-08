@@ -48,6 +48,9 @@ class TelegramStatus:
     bot_id: int | None = None
     channel_id: int | None = None
     channel_title: str | None = None
+    # Telegram "auto-delete messages" period on the channel, in seconds (None = off).
+    # Any value here means stored files are destroyed after that time.
+    auto_delete_seconds: int | None = None
     error: str | None = None
     discovered: list[DiscoveredChannel] = field(default_factory=list)
 
@@ -79,6 +82,8 @@ class TelegramManager:
             self.status.channel_title = channel_title
         try:
             await self._connect(int(api_id), api_hash, bot_token, session)
+            if channel_id:
+                await self.check_auto_delete()
         except Exception as e:  # noqa: BLE001 - surface any startup failure in status
             logger.exception("Telegram reconnect failed")
             self.status.connected = False
@@ -204,7 +209,29 @@ class TelegramManager:
         self.status.channel_id = chat_id
         self.status.channel_title = title or str(chat_id)
         self._entity_cache[chat_id] = entity
+        await self.check_auto_delete()
         return self.status
+
+    async def check_auto_delete(self) -> int | None:
+        """Read the channel's auto-delete period. Files in a channel with
+        auto-delete on are lost after that period, so this is checked at
+        channel selection, at startup and hourly."""
+        try:
+            client = self._require_client()
+            entity = await self._channel_entity()
+            from telethon.tl.functions.channels import GetFullChannelRequest
+            full = await client(GetFullChannelRequest(entity))
+            ttl = getattr(full.full_chat, "ttl_period", None) or None
+        except TelegramNotConfigured:
+            return None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not read channel auto-delete setting: %s", e)
+            return self.status.auto_delete_seconds
+        self.status.auto_delete_seconds = ttl
+        if ttl:
+            logger.error("CHANNEL AUTO-DELETE IS ON (%s s): every stored file will be destroyed after that time. "
+                         "Turn it off in the channel settings.", ttl)
+        return ttl
 
     async def _channel_entity(self):
         client = self._require_client()

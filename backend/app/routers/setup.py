@@ -25,6 +25,7 @@ async def status(db: AsyncSession = Depends(get_db)):
         telegram_connected=st.connected,
         channel_configured=st.channel_id is not None,
         workspace_mode=await settings_store.get(db, "workspace.mode"),
+        channel_auto_delete_seconds=st.auto_delete_seconds,
         version=__version__,
     )
 
