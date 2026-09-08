@@ -17,7 +17,9 @@ from typing import AsyncIterator, Callable
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
-from telethon.tl.types import DocumentAttributeFilename
+from telethon.tl.functions.bots import GetBotInfoRequest, SetBotInfoRequest
+from telethon.tl.functions.channels import GetChannelsRequest
+from telethon.tl.types import DocumentAttributeFilename, InputChannel
 
 from app.telegram.fast_upload import BIG_FILE_THRESHOLD, upload_parallel
 
@@ -84,6 +86,7 @@ class TelegramManager:
             await self._connect(int(api_id), api_hash, bot_token, session)
             if channel_id:
                 await self.check_auto_delete()
+                await self.write_bot_info_channel(int(channel_id))  # idempotent; lets other servers find it
         except Exception as e:  # noqa: BLE001 - surface any startup failure in status
             logger.exception("Telegram reconnect failed")
             self.status.connected = False
@@ -105,6 +108,7 @@ class TelegramManager:
             self.status.configured = True
             self.status.channel_id = None
             self.status.channel_title = None
+            await self.discover_from_bot_info()
             return self.status
 
     async def reconnect(self) -> None:
@@ -189,16 +193,66 @@ class TelegramManager:
     def discovered(self) -> list[DiscoveredChannel]:
         return [DiscoveredChannel(cid, title) for cid, title in self._discovered.items()]
 
+    async def _resolve_channel(self, chat_id: int):
+        """Input entity for a channel id. A fresh session has no entity cache,
+        but bots may address channels they belong to with access_hash 0; the
+        response also teaches Telethon the real hash."""
+        client = self._require_client()
+        try:
+            return await client.get_input_entity(chat_id)
+        except (ValueError, TypeError):
+            bare = int(str(chat_id).replace("-100", "", 1)) if str(chat_id).startswith("-100") else abs(int(chat_id))
+            res = await client(GetChannelsRequest([InputChannel(bare, 0)]))
+            chat = res.chats[0]
+            self._discovered.setdefault(chat_id, chat.title)
+            return InputChannel(chat.id, chat.access_hash)
+
+    async def read_bot_info_channel(self) -> int | None:
+        """Channel id another server of this bot left in the bot's description."""
+        try:
+            client = self._require_client()
+            info = await client(GetBotInfoRequest(bot=None, lang_code=""))
+            for line in (info.description or "").splitlines():
+                if line.strip().startswith(BOTINFO_KEY):
+                    return int(line.strip()[len(BOTINFO_KEY):].split()[0])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("bot info read failed: %s", e)
+        return None
+
+    async def write_bot_info_channel(self, chat_id: int) -> None:
+        """Leave the channel id in the bot's description so a second server
+        with the same token finds the channel without anyone posting."""
+        try:
+            client = self._require_client()
+            info = await client(GetBotInfoRequest(bot=None, lang_code=""))
+            keep = [l for l in (info.description or "").splitlines() if not l.strip().startswith(BOTINFO_KEY)]
+            text = "\n".join(keep + [f"{BOTINFO_KEY}{chat_id}"]).strip()[:512]
+            if text != (info.description or ""):
+                await client(SetBotInfoRequest(lang_code="", bot=None, description=text))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not store channel id in bot info: %s", e)
+
+    async def discover_from_bot_info(self) -> None:
+        cid = await self.read_bot_info_channel()
+        if cid and cid not in self._discovered:
+            try:
+                ent = await self._resolve_channel(cid)
+                res = await self._require_client()(GetChannelsRequest([ent]))
+                self._discovered[cid] = res.chats[0].title
+                logger.info("Discovered channel from bot info: %s (%s)", res.chats[0].title, cid)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("bot-info channel %s not usable: %s", cid, e)
+
     async def set_channel(self, chat_id: int) -> TelegramStatus:
         client = self._require_client()
-        entity = await client.get_input_entity(chat_id)
+        entity = await self._resolve_channel(chat_id)
         msg = await client.send_message(entity, TEST_MESSAGE)
         await client.delete_messages(entity, [msg.id])
         title = self._discovered.get(chat_id)
         if title is None:
             try:
-                full = await client.get_entity(chat_id)
-                title = getattr(full, "title", None)
+                res = await client(GetChannelsRequest([entity]))
+                title = getattr(res.chats[0], "title", None)
             except Exception:  # noqa: BLE001
                 title = None
         async with _db.async_session() as db:
@@ -210,6 +264,7 @@ class TelegramManager:
         self.status.channel_title = title or str(chat_id)
         self._entity_cache[chat_id] = entity
         await self.check_auto_delete()
+        await self.write_bot_info_channel(chat_id)
         return self.status
 
     async def check_auto_delete(self) -> int | None:

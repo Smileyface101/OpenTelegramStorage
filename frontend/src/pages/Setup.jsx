@@ -117,22 +117,31 @@ export function ChannelStep({ onDone, onBack }) {
   const [manual, setManual] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [auto, setAuto] = useState(null)   // chat id being auto-selected
   const load = async () => setStatus(await get('/api/telegram/status'))
   useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t) }, [])
   const choose = async (chatId) => {
     setError(''); setBusy(true)
-    try { await post('/api/telegram/channel', { chat_id: Number(chatId) }); onDone() } catch (err) { setError(err.message) } finally { setBusy(false) }
+    try { const st = await post('/api/telegram/channel', { chat_id: Number(chatId) }); setStatus(st); if (!st.auto_delete_seconds) onDone() } catch (err) { setError(err.message) } finally { setBusy(false); setAuto(null) }
   }
+  // One channel known and none chosen: pick it without asking. In almost every
+  // setup a bot belongs to exactly one channel.
+  useEffect(() => {
+    if (!status || status.channel || busy || auto || error) return
+    const d = status.discovered || []
+    if (d.length === 1) { setAuto(d[0].chat_id); const t = setTimeout(() => choose(d[0].chat_id), 1200); return () => clearTimeout(t) }
+  }, [status])  // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="card space-y-3">
       <p className="text-sm text-ink-300">Bot connected as <b>@{status?.bot_username || '…'}</b>. Now it needs a private channel to keep your files in.</p>
+      {auto && <div className="rounded-lg border border-brand-500/40 bg-brand-500/10 px-3 py-2 text-sm">Found the channel this bot already uses: <b>{(status?.discovered || []).find((c) => c.chat_id === auto)?.title}</b>. Connecting…</div>}
       <Guide title="Step C — create the channel and add the bot">
         <ol>
           <li>In Telegram: <i>New Channel</i> (on desktop: menu ☰ → New Channel; on mobile: the pencil button → New Channel). Name it anything, e.g. <i>File Vault</i>.</li>
           <li>Choose <b>Private channel</b>. Skip adding members.</li>
           <li>Open the channel → tap its name → <i>Administrators</i> → <i>Add Administrator</i> → search for <code>@{status?.bot_username || 'your_bot'}</code> and select it.</li>
           <li>Leave the permissions at their defaults; the bot needs at least <b>Post messages</b> and <b>Delete messages</b>. Save.</li>
-          <li>Post any message in the channel (a single "hi" is enough). That post is how the bot learns the channel exists; it appears in the list below within a few seconds.</li>
+          <li>Post any message in the channel (a single "hi" is enough). That post is how the bot learns the channel exists; it appears below within a few seconds and, if it is the only one, is selected for you. Skip this step if the bot was already set up on another server: the channel is found automatically.</li>
           <li><b>Make sure "Auto-delete messages" is Off</b> in the channel settings. With it on, Telegram erases your files after the chosen period. The app checks this and refuses to continue while it is on.</li>
         </ol>
       </Guide>
@@ -142,7 +151,7 @@ export function ChannelStep({ onDone, onBack }) {
         <p><b>Not showing up?</b> Make sure the message was posted <i>after</i> the bot was made admin, then post another one. If it still does not appear, get the channel id by forwarding one of its messages to <a className="underline" href="https://t.me/getidsbot" target="_blank" rel="noreferrer">@getidsbot</a> and enter it manually below (it starts with <code>-100</code>).</p>
       </Guide>
       <div className="space-y-2">
-        {(status?.discovered || []).length === 0 && <div className="text-xs text-ink-400">Waiting for a channel post…</div>}
+        {(status?.discovered || []).length === 0 && <div className="text-xs text-ink-400">Waiting for a channel post… (a bot cannot list its channels; if this bot was already set up on another server, its channel is found automatically)</div>}
         {(status?.discovered || []).map((c) => (
           <div key={c.chat_id} className="flex items-center justify-between rounded-lg bg-ink-800 px-3 py-2 text-sm">
             <span>{c.title} <span className="text-ink-400 text-xs">{c.chat_id}</span></span>
