@@ -30,10 +30,8 @@ class FakeManager:
         self.messages[mid] = (file_name, data, caption)
         return mid
 
-    async def probe_last_message_id(self):
-        mid = self._next
-        self._next += 1
-        return mid
+    async def probe_last_message_id(self):  # no longer used by the app; kept for old tests
+        raise AssertionError("the app must not post marker messages")
 
     async def fetch_messages(self, ids, include_text=False):
         import json

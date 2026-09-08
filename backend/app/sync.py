@@ -35,7 +35,14 @@ _hello_pending: list = []   # set by apply_event("hello"); drained by the worker
 # Anything that changes the index bumps this; the UI polls it to refresh.
 revision = 0
 status = {"last_live_at": None, "last_live_kind": None, "last_catchup_at": None, "last_catchup": None,
-          "last_reconcile_at": None, "events_applied": 0, "parts_indexed": 0, "last_error": None, "server_id": None}
+          "last_reconcile_at": None, "events_applied": 0, "parts_indexed": 0, "last_error": None, "server_id": None,
+          "top_seen": 0}
+
+
+def note_message_id(message_id: int) -> None:
+    """Highest channel message id we know of (live posts, our own sends)."""
+    if message_id and message_id > status["top_seen"]:
+        status["top_seen"] = message_id
 
 
 def bump() -> None:
@@ -310,6 +317,7 @@ async def apply_event(db, ev: dict) -> bool:
 
 async def handle_post(message_id: int, text: str, doc_size: int | None) -> None:
     """Live channel post (called from the Telegram manager)."""
+    note_message_id(message_id)
     async with _db.async_session() as db:
         if not await settings_store.shared_mode(db):
             return
@@ -337,35 +345,45 @@ async def handle_post(message_id: int, text: str, doc_size: int | None) -> None:
 
 
 async def catch_up(manager) -> dict:
-    """Scan message ids newer than the last one we processed."""
+    """Scan message ids newer than the last one we processed. No marker
+    messages: we read forward in batches and stop at the first batch past the
+    highest id we know of that contains nothing (ids are assigned in order,
+    so an empty stretch beyond the top means the channel ends there)."""
     summary = {"scanned": 0, "parts": 0, "events": 0}
     async with _db.async_session() as db:
         if not await settings_store.shared_mode(db):
             return summary
         last = await settings_store.get_int(db, "workspace.last_message_id", 0)
-    top = await manager.probe_last_message_id()
-    if top <= last + 1:
-        return summary
-    for start in range(last + 1, top, BATCH):
-        ids = list(range(start, min(start + BATCH, top)))
+    start = last + 1
+    highest_found = last
+    while True:
+        ids = list(range(start, start + BATCH))
         msgs = await manager.fetch_messages(ids, include_text=True)
         summary["scanned"] += len(ids)
-        async with _db.async_session() as db:
-            for m in msgs:
-                cap = parse_caption(m["caption"]) if m.get("size") is not None else None
-                ev = parse_event(m["caption"]) if cap is None else None
-                try:
-                    if cap is not None:
-                        if await index_part(db, m["id"], cap, m["size"]):
-                            summary["parts"] += 1
-                    elif ev is not None:
-                        if await apply_event(db, ev):
-                            summary["events"] += 1
-                except Exception as e:  # noqa: BLE001
-                    status["last_error"] = f"catch-up message {m['id']}: {e}"[:300]
-                    logger.exception("sync: catch-up failed on message %s", m["id"])
-            await settings_store.set(db, "workspace.last_message_id", str(ids[-1]))
-            await db.commit()
+        if msgs:
+            async with _db.async_session() as db:
+                for m in msgs:
+                    highest_found = max(highest_found, m["id"])
+                    cap = parse_caption(m["caption"]) if m.get("size") is not None else None
+                    ev = parse_event(m["caption"]) if cap is None else None
+                    try:
+                        if cap is not None:
+                            if await index_part(db, m["id"], cap, m["size"]):
+                                summary["parts"] += 1
+                        elif ev is not None:
+                            if await apply_event(db, ev):
+                                summary["events"] += 1
+                    except Exception as e:  # noqa: BLE001
+                        status["last_error"] = f"catch-up message {m['id']}: {e}"[:300]
+                        logger.exception("sync: catch-up failed on message %s", m["id"])
+                await settings_store.set(db, "workspace.last_message_id", str(highest_found))
+                await db.commit()
+            note_message_id(highest_found)
+        elif start > status["top_seen"]:
+            break  # nothing here and nothing known beyond: end of channel
+        start += BATCH
+        if summary["scanned"] > 20000:
+            break  # safety valve
     status["last_catchup_at"] = datetime.utcnow().isoformat()
     status["last_catchup"] = summary
     if summary["parts"] or summary["events"]:

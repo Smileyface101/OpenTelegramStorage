@@ -117,7 +117,8 @@ async def test_catch_up_after_downtime(api, admin, fake_manager):
     assert names == ["b.bin"]
     # Second run scans nothing new.
     again = await sync.catch_up(fake_manager)
-    assert again["parts"] == 0 and again["events"] == 0 and again["scanned"] <= 1  # only the probe marker id
+    assert again["parts"] == 0 and again["events"] == 0  # one empty batch confirms the end; no marker posted
+    assert not any(v[1] is None and "marker" in str(v[2]) for v in fake_manager.messages.values())
     r = await api.post("/api/admin/sync/catch-up")
     assert r.status_code == 200
 

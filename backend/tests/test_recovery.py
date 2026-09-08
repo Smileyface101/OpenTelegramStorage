@@ -26,9 +26,9 @@ async def test_rebuild_index_from_channel(api, admin, fake_manager):
     assert (await api.get("/api/files")).json() == {"folder": None, "breadcrumbs": [], "folders": [], "files": []}
 
     # Drop one message of a third file to exercise the incomplete path.
-    fake_manager.messages[999] = ("lost.bin.001", b"x" * 10, {"ots": 1, "id": "deadbeef", "name": "lost.bin", "size": 20,
+    fake_manager.messages[200] = ("lost.bin.001", b"x" * 10, {"ots": 1, "id": "deadbeef", "name": "lost.bin", "size": 20,
                                                               "part": 1, "of": 2, "psize": 10, "sha256": None})
-    fake_manager._next = 1000
+    fake_manager._next = 201
 
     r = await api.post("/api/admin/rebuild")
     assert r.status_code == 200

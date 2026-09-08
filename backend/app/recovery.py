@@ -103,17 +103,31 @@ async def rebuild(manager, owner_id: int, part_size_default: int) -> RebuildStat
         return state
 
 
-async def _rebuild(manager, owner_id: int, part_size_default: int) -> None:
-    last = await manager.probe_last_message_id()
-    state.last_message_id = last
-    state.note(f"Channel has message ids up to {last}")
+EMPTY_BATCHES_TO_STOP = 5   # tolerate up to ~500 consecutively deleted messages
 
-    # 1) Collect every part caption in the channel.
+
+async def _rebuild(manager, owner_id: int, part_size_default: int) -> None:
+    # 1) Collect every part caption in the channel, reading forward in batches
+    #    of ids (bots cannot list history). No marker message is posted.
     found: dict[str, dict] = {}  # file id -> {"meta": caption, "parts": {index: {...}}}
-    for start in range(1, last + 1, BATCH):
-        ids = list(range(start, min(start + BATCH, last + 1)))
+    from app import sync
+    start, empty_run, last = 1, 0, 0
+    while True:
+        ids = list(range(start, start + BATCH))
         msgs = await manager.fetch_messages(ids)
         state.scanned += len(ids)
+        if msgs:
+            empty_run = 0
+            last = max(last, max(m["id"] for m in msgs))
+        elif start > sync.status.get("top_seen", 0):
+            empty_run += 1
+            if empty_run >= EMPTY_BATCHES_TO_STOP:
+                break
+        start += BATCH
+        if state.scanned > 200000:
+            state.note("Stopped after 200k ids")
+            break
+        state.last_message_id = max(last, sync.status.get("top_seen", 0))
         for m in msgs:
             cap = parse_caption(m["caption"])
             if cap is None:
@@ -127,7 +141,8 @@ async def _rebuild(manager, owner_id: int, part_size_default: int) -> None:
             }
             state.parts_found += 1
         await asyncio.sleep(0)  # let the API answer status polls
-    state.note(f"Found {state.parts_found} part(s) belonging to {len(found)} file(s)")
+    state.last_message_id = max(last, sync.status.get("top_seen", 0))
+    state.note(f"Scanned up to message id {state.last_message_id}; found {state.parts_found} part(s) belonging to {len(found)} file(s)")
 
     # 2) Import what the index does not have.
     async with _db.async_session() as db:

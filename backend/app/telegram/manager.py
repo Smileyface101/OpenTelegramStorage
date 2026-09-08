@@ -252,6 +252,8 @@ class TelegramManager:
             caption=json.dumps(caption, separators=(",", ":")),
             attributes=[DocumentAttributeFilename(file_name=file_name)],
         )
+        from app import sync
+        sync.note_message_id(msg.id)
         return msg.id
 
     async def get_document(self, message_id: int):
@@ -289,6 +291,8 @@ class TelegramManager:
         client = self._require_client()
         entity = await self._channel_entity()
         msg = await client.send_message(entity, text, link_preview=False)
+        from app import sync
+        sync.note_message_id(msg.id)
         return msg.id
 
     async def fetch_messages(self, ids: list[int], include_text: bool = False) -> list[dict]:
