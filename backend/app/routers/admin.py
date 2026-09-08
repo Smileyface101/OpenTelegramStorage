@@ -198,6 +198,11 @@ async def run_cleanup(user: User = Depends(security.current_admin)):
 async def encryption_status(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
     from app.models import File
     key = await crypto.get_key(db)
+    if key is None and await crypto.encrypt_new_files(db):
+        # Encryption is on: make the key exist now so it can be exported
+        # before the first upload, not only after.
+        key = await crypto.ensure_key(db)
+        await db.commit()
     kid = crypto.key_id_of(key) if key else None
     n_enc = await db.scalar(select(func.count(File.id)).where(File.encrypted == True))  # noqa: E712
     n_other = await db.scalar(select(func.count(File.id)).where(File.encrypted == True, File.key_id != kid)) if kid else 0  # noqa: E712
@@ -212,7 +217,8 @@ async def encryption_export(data: KeyExport, db: AsyncSession = Depends(get_db),
         raise HTTPException(400, "Password is incorrect")
     key = await crypto.get_key(db)
     if key is None:
-        raise HTTPException(404, "No content key exists yet")
+        key = await crypto.ensure_key(db)
+        await db.commit()
     return {"key": key.hex(), "key_id": crypto.key_id_of(key)}
 
 

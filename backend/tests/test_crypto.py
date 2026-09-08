@@ -128,11 +128,11 @@ async def test_encrypted_upload_download_verify_share_rebuild(api, admin, fake_m
 
 async def test_key_export_import_and_toggle(api, admin, fake_manager):
     st = (await api.get("/api/admin/encryption")).json()
-    assert st["has_key"] is False  # created lazily on first encrypted upload
+    assert st["has_key"] is True and st["encrypted_files"] == 0  # key exists as soon as encryption is on
     f = (await _upload(api, "a.bin", b"x" * 1000))["file"]
     await _drain(transfer_worker.worker)
-    st = (await api.get("/api/admin/encryption")).json()
-    assert st["has_key"] and st["encrypted_files"] == 1 and st["key_id"] == f["key_id"]
+    st2 = (await api.get("/api/admin/encryption")).json()
+    assert st2["encrypted_files"] == 1 and st2["key_id"] == st["key_id"] == f["key_id"]
     assert (await api.post("/api/admin/encryption/export", json={"password": "wrong"})).status_code == 400
     exp = (await api.post("/api/admin/encryption/export", json={"password": "correct horse battery"})).json()
     assert len(exp["key"]) == 64 and exp["key_id"] == st["key_id"]
