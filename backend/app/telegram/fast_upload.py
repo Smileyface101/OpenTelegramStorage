@@ -44,9 +44,17 @@ class _Reader:
 
 
 async def _make_sender(client: TelegramClient, dc_id: int):
-    # Private Telethon API, pinned by requirements. Creates an independent
-    # MTProto connection with an exported authorization for this DC.
-    return await client._create_exported_sender(dc_id)  # noqa: SLF001
+    """Extra MTProto connection to the session's own data center.
+
+    Telegram refuses ExportAuthorization for the DC you are connected to, so
+    (as FastTelethon does) a same-DC sender simply reuses the session's auth
+    key on a fresh connection. Private Telethon API, pinned by requirements."""
+    from telethon.network import MTProtoSender
+    dc = await client._get_dc(dc_id)  # noqa: SLF001
+    sender = MTProtoSender(client.session.auth_key, loggers=client._log)  # noqa: SLF001
+    await sender.connect(client._connection(  # noqa: SLF001
+        dc.ip_address, dc.port, dc.id, loggers=client._log, proxy=client._proxy))  # noqa: SLF001
+    return sender
 
 
 async def upload_parallel(client: TelegramClient, stream, size: int, file_name: str, *,
@@ -64,7 +72,9 @@ async def upload_parallel(client: TelegramClient, stream, size: int, file_name: 
     sent_lock = asyncio.Lock()
     senders = []
     try:
-        senders = await asyncio.gather(*[_make_sender(client, dc_id) for _ in range(connections)])
+        # Sequential so a failure leaves nothing half-connected behind.
+        for _ in range(connections):
+            senders.append(await _make_sender(client, dc_id))
 
         async def worker(sender) -> None:
             nonlocal sent
