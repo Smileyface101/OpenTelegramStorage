@@ -12,13 +12,14 @@ const PARALLEL = 3  // chunks in flight per file
 // server keeps a bitmap of received chunks, so chunks go up several at a
 // time, retries are idempotent, and an interrupted upload resumes by sending
 // only what is missing (pass resumeId). Bundle members stay sequential.
-export async function uploadFile(file, { folderId = null, bundleId = null, path = null, memberIndex = null, resumeId = null, handle = null, onProgress, onStatus, signal } = {}) {
+export async function uploadFile(file, { folderId = null, bundleId = null, path = null, memberIndex = null, resumeId = null, handle = null, onProgress, onStatus, onInit, signal } = {}) {
   const init = resumeId
     ? await api(`/api/uploads/${resumeId}`, { signal })
     : await api('/api/uploads', {
       method: 'POST', signal,
       body: { name: file.name, size: file.size, mime_type: file.type || null, folder_id: folderId, bundle_id: bundleId, path, member_index: memberIndex },
     })
+  onInit?.(init)
   if (init.parallel) return uploadParallel(file, init, { handle, onProgress, onStatus, signal })
   return uploadSequential(file, init, { bundleId, onProgress, onStatus, signal })
 }
@@ -141,11 +142,12 @@ async function makeHasher(partSize, size) {
 // server can fix the archive layout; members are then streamed in order and
 // the zip bytes flow straight into the part pipeline (never a whole file on
 // disk). `items` are {file, path}; path is the name inside the archive.
-export async function uploadBundle(items, { name, folderId = null, onProgress, onStatus, signal } = {}) {
+export async function uploadBundle(items, { name, folderId = null, onProgress, onStatus, onInit, signal } = {}) {
   const bundle = await api('/api/bundles', {
     method: 'POST', signal,
     body: { name, folder_id: folderId, members: items.map(({ file, path }) => ({ path: path || file.name, size: file.size })) },
   })
+  onInit?.({ file_id: bundle.file_id })
   const total = items.reduce((a, it) => a + it.file.size, 0)
   let doneBefore = 0
   try {

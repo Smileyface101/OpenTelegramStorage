@@ -118,14 +118,19 @@ export default function Files({ user }) {
   // ---------------------------------------------------------------- uploads
   const track = (name, size) => {
     const id = uuid(); const ctrl = new AbortController()
-    setUploads((u) => [...u, { id, name, size, done: 0, ctrl, status: 'uploading' }])
+    setUploads((u) => [...u, { id, name, size, done: 0, ctrl, status: 'uploading', fileId: null }])
     return {
       ctrl,
       onStatus: (st) => setUploads((u) => u.map((x) => x.id === id ? { ...x, status: st } : x)),
       onProgress: (d) => setUploads((u) => u.map((x) => x.id === id ? { ...x, done: d } : x)),
+      onInit: (init) => { setUploads((u) => u.map((x) => x.id === id ? { ...x, fileId: init.file_id } : x)); load() },
       finish: () => setUploads((u) => u.filter((x) => x.id !== id)),
     }
   }
+  // Browser-side upload state for a file row (so the row shows both hops).
+  const uploadFor = (fileId) => uploads.find((u) => u.fileId === fileId)
+  const visibleFileIds = new Set((data?.files || []).map((f) => f.id))
+  const cardUploads = uploads.filter((u) => !u.fileId || !visibleFileIds.has(u.fileId))
   const startUploads = (files, asZip = false, target = folderId) => {
     if (!files.length) return
     if (asZip) return setModal({ type: 'zip', items: files.map((file) => ({ file, path: file.name })), target })
@@ -138,7 +143,7 @@ export default function Files({ user }) {
   const runUpload = async (file, target = folderId, { handle = null, resumeId = null } = {}) => {
     const t = track(file.name, file.size)
     try {
-      await uploadFile(file, { folderId: target, handle, resumeId, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus })
+      await uploadFile(file, { folderId: target, handle, resumeId, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus, onInit: t.onInit })
       await load(); await loadPending()
     } catch (e) { if (!t.ctrl.signal.aborted) setError(`${file.name}: ${e.message}`) }
     finally { t.finish() }
@@ -196,7 +201,7 @@ export default function Files({ user }) {
   const runZip = async (items, name, target = folderId) => {
     setModal(null)
     const t = track(`${name}.zip`, items.reduce((a, it) => a + it.file.size, 0))
-    try { await uploadBundle(items, { name, folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus }); await load() }
+    try { await uploadBundle(items, { name, folderId: target, signal: t.ctrl.signal, onProgress: t.onProgress, onStatus: t.onStatus, onInit: t.onInit }); await load() }
     catch (e) { if (!t.ctrl.signal.aborted) setError(`${name}.zip: ${e.message}`) }
     finally { t.finish() }
   }
@@ -380,10 +385,10 @@ export default function Files({ user }) {
             </div>
           )}
 
-          {uploads.length > 0 && (
+          {cardUploads.length > 0 && (
             <div className="card space-y-3">
-              <div className="text-xs uppercase tracking-wide text-ink-400">Uploading to server <span className="normal-case text-ink-500">· completed parts are sent to Telegram in parallel</span></div>
-              {uploads.map((u) => (
+              <div className="text-xs uppercase tracking-wide text-ink-400">Starting uploads <span className="normal-case text-ink-500">· each file gets its own row below as soon as it is registered</span></div>
+              {cardUploads.map((u) => (
                 <div key={u.id}>
                   <div className="flex justify-between text-sm"><span className="truncate">{u.name}{u.status === 'waiting' && <span className="ml-2 text-xs text-amber-300">waiting for Telegram to catch up…</span>}</span>
                     <span className="text-ink-400 flex items-center gap-2 shrink-0">{bytes(u.done)} / {bytes(u.size)}
@@ -438,12 +443,23 @@ export default function Files({ user }) {
                             {f.uploaded_by && <span className="text-[11px] text-ink-500 shrink-0" title="Uploaded by">{f.uploaded_by}</span>}
                             <Integrity f={f} /></div>
                           {f.integrity_error && <div className="text-xs text-red-300 mt-1 truncate">Integrity: {f.integrity_error}</div>}
-                          {f.status !== 'ready' && f.status !== 'failed' && (
-                            <div className="mt-1 max-w-xs">
-                              <Progress value={pct(f.bytes_done, f.size)} />
-                              {f.status === 'receiving' && <div className="text-[11px] text-ink-400 mt-0.5">{bytes(f.bytes_received)} received · {bytes(f.bytes_done)} in channel</div>}
-                            </div>
-                          )}
+                          {f.status !== 'ready' && f.status !== 'failed' && (() => {
+                            const up = uploadFor(f.id)
+                            const received = up ? Math.max(up.done, f.bytes_received || 0) : (f.bytes_received || 0)
+                            return (
+                              <div className="mt-1 max-w-sm">
+                                <div className="relative h-1.5 w-full rounded bg-ink-700 overflow-hidden" title="light: received from your browser · solid: stored in Telegram">
+                                  <div className="absolute inset-y-0 left-0 bg-brand-500/30" style={{ width: `${pct(received, f.size)}%` }} />
+                                  <div className="absolute inset-y-0 left-0 bg-brand-500" style={{ width: `${pct(f.bytes_done, f.size)}%` }} />
+                                </div>
+                                <div className="text-[11px] text-ink-400 mt-0.5 flex items-center gap-2">
+                                  <span>{f.status === 'receiving' || up ? `${bytes(received)} from browser · ` : ''}{bytes(f.bytes_done)} in Telegram{f.parts_total > 1 ? ` · part ${Math.min(f.parts_uploaded + 1, f.parts_total)}/${f.parts_total}` : ''}</span>
+                                  {up?.status === 'waiting' && <span className="text-amber-300">browser paused while Telegram catches up</span>}
+                                  {up && <button onClick={() => up.ctrl.abort()} className="text-red-300 hover:text-red-200">cancel upload</button>}
+                                </div>
+                              </div>
+                            )
+                          })()}
                           {f.error && <div className="text-xs text-red-300 mt-1 truncate">{f.error}</div>}
                         </td>
                         <td className="p-3 text-right text-ink-300 hidden sm:table-cell whitespace-nowrap">{bytes(f.size)}</td>

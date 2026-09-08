@@ -163,6 +163,8 @@ async def init_upload(data: UploadInit, db: AsyncSession = Depends(get_db), user
         staging.begin(f)
         up._part_size = part_size
     await db.commit()
+    from app import sync
+    sync.bump()  # the new row shows up in every open Files page right away
     return _upload_out(up)
 
 
@@ -455,6 +457,8 @@ async def create_bundle(data: BundleCreate, db: AsyncSession = Depends(get_db), 
     b.file_id = f.id
     staging.begin(f)
     await db.commit()
+    from app import sync
+    sync.bump()
     return {"id": b.id, "name": b.name, "file_id": f.id, "size": layout.total, "compress": False,
             "members": [{"index": e.index, "path": e.path, "size": e.size} for e in layout.entries]}
 
