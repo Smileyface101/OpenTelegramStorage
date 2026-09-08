@@ -42,6 +42,13 @@ browser ──chunked, resumable──▶ part staging ──worker──▶ Tel
   and there is no size limit beyond your channel.
 * **Downloads stream.** Parts are fetched from Telegram and joined on the fly,
   with HTTP Range support, so nothing is buffered on disk.
+* **Encrypted at rest in Telegram.** New uploads are encrypted on your
+  server before they leave it (AES-256-GCM in 1 MiB blocks, a fresh subkey
+  per part), so the channel only ever holds ciphertext; downloads, ranges,
+  Verify and share links decrypt on the fly. The content key lives in the
+  data directory under the master key. Export it from Settings and keep it
+  safe: without it, encrypted files cannot be recovered on a new machine.
+  Can be switched off for new uploads.
 * **Integrity end to end.** The browser hashes the file while reading it and
   the server hashes every part as it arrives; a mismatch rejects the upload.
   Each part is checked against its recorded SHA-256 as it streams out on
@@ -114,9 +121,9 @@ For frontend development run `npm run dev` (proxies `/api` to port 8000).
   individually or all at once.
 * Sessions are server-side; the cookie is HttpOnly, SameSite=Lax and Secure
   on HTTPS. State-changing requests need a CSRF token (double submit).
-* The bot token, API hash and MTProto session are encrypted with AES-256-GCM
-  under a master key that lives in `data/master.key` (mode 0600) or in the
-  `OTS_MASTER_KEY` environment variable.
+* The bot token, API hash, MTProto session and the content key are encrypted
+  with AES-256-GCM under a master key that lives in `data/master.key` (mode
+  0600) or in the `OTS_MASTER_KEY` environment variable.
 * Users only ever see their own folders and files. Admins manage users,
   Telegram settings and transfer settings.
 * The app has no built-in TLS. If you expose it beyond localhost put Caddy,
@@ -142,7 +149,6 @@ size); the upload is refused otherwise.
 
 ## Roadmap
 
-- Optional encryption of parts (AES-GCM) so Telegram never holds readable bytes.
 - User-account (phone) login for 4 GB parts with Telegram Premium.
 
 ## Development

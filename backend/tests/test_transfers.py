@@ -1,3 +1,4 @@
+from tests.conftest import stored_plaintext
 import hashlib
 import io
 import os
@@ -53,7 +54,7 @@ async def test_upload_split_download_delete(api, admin, fake_manager):
     assert f["status"] == "ready", f
     assert f["parts_total"] == 3 and f["parts_uploaded"] == 3
     assert not list(config.STAGING_DIR.glob("*.p0*")), "part staging must be cleaned up"
-    assert fake_manager.stored_bytes() == data
+    assert await stored_plaintext(fake_manager) == data
     names = [v[0] for _k, v in sorted(fake_manager.messages.items())]
     assert names == ["big.bin.001", "big.bin.002", "big.bin.003"]
     cap = list(fake_manager.messages.values())[0][2]
@@ -104,7 +105,7 @@ async def test_parallel_chunks_any_order_idempotent(api, admin, fake_manager):
     await _drain(transfer_worker.worker)
     f = (await api.get(f"/api/files/{up['file_id']}")).json()
     assert f["status"] == "ready" and f["sha256"] == hashlib.sha256(data).hexdigest()
-    assert fake_manager.stored_bytes() == data
+    assert await stored_plaintext(fake_manager) == data
 
 
 async def test_parallel_chunks_concurrently(api, admin, fake_manager):
@@ -120,7 +121,7 @@ async def test_parallel_chunks_concurrently(api, admin, fake_manager):
     await _drain(transfer_worker.worker)
     f = (await api.get(f"/api/files/{up['file_id']}")).json()
     assert f["status"] == "ready" and f["sha256"] == hashlib.sha256(data).hexdigest()
-    assert fake_manager.stored_bytes() == data
+    assert await stored_plaintext(fake_manager) == data
 
 
 async def test_retry_after_failures(api, admin, fake_manager):
@@ -320,7 +321,7 @@ async def test_streaming_overlap_and_backpressure(api, admin, fake_manager):
     f = (await api.get(f"/api/files/{fid}")).json()
     assert f["status"] == "ready" and f["parts_uploaded"] == 7
     assert f["sha256"] == hashlib.sha256(data).hexdigest()
-    assert fake_manager.stored_bytes() == data
+    assert await stored_plaintext(fake_manager) == data
     caps = [v[2] for _k, v in sorted(fake_manager.messages.items())]
     assert [c["sha256"] for c in caps] == [hashlib.sha256(data[i * 1048576:(i + 1) * 1048576]).hexdigest() for i in range(7)]
     assert not list(config.STAGING_DIR.glob(f"{fid}.p*"))

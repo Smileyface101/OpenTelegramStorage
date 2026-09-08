@@ -27,9 +27,10 @@ async def test_verify_ok_then_detects_corruption(api, admin, fake_manager):
     # Corrupt part 2 in the "channel".
     mid = sorted(fake_manager.messages)[1]
     name, blob, cap = fake_manager.messages[mid]
-    fake_manager.messages[mid] = (name, blob[:10] + bytes([blob[10] ^ 0xFF]) + blob[11:], cap)
+    # Flip a byte well past the 20-byte encryption header so the data itself is damaged.
+    fake_manager.messages[mid] = (name, blob[:100] + bytes([blob[100] ^ 0xFF]) + blob[101:], cap)
     f = await _verify(api, f["id"])
-    assert "part 2: checksum mismatch" in f["integrity_error"]
+    assert "part 2" in f["integrity_error"]  # checksum mismatch (plain) or decryption failed (encrypted)
 
     # A full download aborts instead of handing over corrupt bytes.
     import httpx

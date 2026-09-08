@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import config, vault
 from app.models import Setting
 
-SECRET_KEYS = {"telegram.api_hash", "telegram.bot_token", "telegram.session"}
+SECRET_KEYS = {"telegram.api_hash", "telegram.bot_token", "telegram.session", "content.key"}
 
 DEFAULTS: dict[str, str] = {
     "transfer.part_size_mb": str(config.DEFAULT_PART_SIZE_MB),
@@ -14,6 +14,7 @@ DEFAULTS: dict[str, str] = {
     "transfer.upload_connections": "4",
     "transfer.stale_upload_hours": "72",
     "app.public_url": "",
+    "content.encrypt_new": "true",
 }
 
 
@@ -70,6 +71,7 @@ async def public_settings(db: AsyncSession) -> dict:
         "upload_connections": max(1, min(16, await get_int(db, "transfer.upload_connections", 4))),
         "stale_upload_hours": await get_int(db, "transfer.stale_upload_hours", 72),
         "public_url": (await get(db, "app.public_url")) or "",
+        "encrypt_new": await get_bool(db, "content.encrypt_new", True),
     }
 
 

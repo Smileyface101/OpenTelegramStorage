@@ -113,8 +113,11 @@ async def _rebuild(manager, owner_id: int, part_size_default: int) -> None:
             if cap is None:
                 continue
             entry = found.setdefault(str(cap["id"]), {"meta": cap, "parts": {}})
+            enc = cap.get("enc") if isinstance(cap.get("enc"), dict) else None
             entry["parts"][int(cap["part"]) - 1] = {
                 "message_id": m["id"], "size": int(cap.get("psize", m["size"])), "sha256": cap.get("sha256"),
+                "enc_salt": enc.get("salt") if enc else None, "enc_size": enc.get("ct") if enc else None,
+                "kid": enc.get("kid") if enc else None,
             }
             state.parts_found += 1
         await asyncio.sleep(0)  # let the API answer status polls
@@ -133,9 +136,11 @@ async def _rebuild(manager, owner_id: int, part_size_default: int) -> None:
             folder_id = await _ensure_path(db, owner_id, meta.get("path"))
             sizes = [parts[i]["size"] for i in range(total) if i in parts]
             part_size = max(sizes) if sizes else part_size_default
+            kids = {p.get("kid") for p in parts.values() if p.get("kid")}
             f = File(
                 id=fid, owner_id=owner_id, folder_id=folder_id, name=str(meta["name"])[:255],
                 size=int(meta["size"]), is_archive=bool(meta.get("archive")), part_size=part_size,
+                encrypted=bool(kids), key_id=(next(iter(kids)) if kids else None),
                 status=FileStatus.READY if complete else FileStatus.FAILED,
                 error=None if complete else f"Recovered from channel but {total - len(parts)} of {total} part(s) are missing",
                 ready_at=datetime.utcnow() if complete else None,
@@ -148,6 +153,7 @@ async def _rebuild(manager, owner_id: int, part_size_default: int) -> None:
                 db.add(FilePart(file_id=fid, index=i, offset=offset, size=size,
                                 sha256=p["sha256"] if p else None,
                                 message_id=p["message_id"] if p else None,
+                                enc_salt=p["enc_salt"] if p else None, enc_size=p["enc_size"] if p else None,
                                 uploaded_at=datetime.utcnow() if p else None))
                 offset += size
             if complete:

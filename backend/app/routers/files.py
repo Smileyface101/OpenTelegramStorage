@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import security
+from app import crypto, security
 from app.db import get_db
 from app.models import File, FileStatus, Folder, User
 from app.routers.common import file_out, folder_out
@@ -341,9 +341,12 @@ async def verify_file(file_id: str, db: AsyncSession = Depends(get_db), user: Us
     return {"ok": True, "verifying": True}
 
 
-def stream_file(f: File, request: Request) -> StreamingResponse:
+def stream_file(f: File, request: Request, key: bytes | None = None) -> StreamingResponse:
     """Build the (Range-aware, integrity-checked) streaming response for a
-    READY file. Shared by the authenticated download and public share links."""
+    READY file. Shared by the authenticated download and public share links.
+    Encrypted files are decrypted block by block on the way out."""
+    if f.encrypted and (key is None or crypto.key_id_of(key) != f.key_id):
+        raise HTTPException(503, "This file is encrypted and its content key is not available on this server")
     parts = sorted(f.parts, key=lambda p: p.index)
     rng = _parse_range(request.headers.get("range"), f.size) if f.size else None
     start, end = rng if rng else (0, max(f.size - 1, 0))
@@ -363,7 +366,8 @@ def stream_file(f: File, request: Request) -> StreamingResponse:
             full = from_off == 0 and take == p.size and p.sha256
             h = hashlib.sha256() if full else None
             doc = await manager.get_document(p.message_id)
-            async for chunk in manager.iter_download(doc, from_off, take):
+            source = crypto.decrypt_range(manager, doc, p, key, from_off, take) if f.encrypted else manager.iter_download(doc, from_off, take)
+            async for chunk in source:
                 remaining -= len(chunk)
                 if h is not None:
                     h.update(chunk)
@@ -396,7 +400,7 @@ async def download(file_id: str, request: Request, db: AsyncSession = Depends(ge
         raise HTTPException(409, "File is not fully in the channel yet")
     if not manager.ready():
         raise HTTPException(503, "Telegram is not connected")
-    return stream_file(f, request)
+    return stream_file(f, request, await crypto.get_key(db) if f.encrypted else None)
 
 
 def _quote(name: str) -> str:

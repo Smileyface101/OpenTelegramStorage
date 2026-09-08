@@ -12,7 +12,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app import config, settings_store
+from app import config, crypto, settings_store
 from app import db as _db
 from app.models import File, FilePart, FileStatus, Folder
 from app.transfers.io import RangeReader, hash_ranges, part_name, plan_parts
@@ -58,7 +58,7 @@ async def folder_path(db, folder_id: int | None) -> str | None:
 
 def caption_for(file: File, part: FilePart, total_parts: int, path: str | None = None) -> dict:
     """Self-describing caption so the channel alone can rebuild the index."""
-    return {
+    cap = {
         "ots": 1,
         "id": file.id,
         "name": file.name,
@@ -70,6 +70,9 @@ def caption_for(file: File, part: FilePart, total_parts: int, path: str | None =
         "archive": file.is_archive,
         "path": path,
     }
+    if file.encrypted:
+        cap["enc"] = {"v": 1, "kid": file.key_id, "salt": part.enc_salt, "ct": part.enc_size}
+    return cap
 
 
 class TransferWorker:
@@ -215,9 +218,10 @@ class TransferWorker:
             progress.set(file.id, _idx, sent, size)
 
         progress.set(file.id, part.index, 0, part.size)
-        with RangeReader(part.staging_path, 0, part.size, name=name) as reader:
+        with RangeReader(part.staging_path, 0, part.size, name=name) as raw:
+            reader, size = await self._maybe_encrypt(db, file, part, raw)
             message_id = await self.manager.upload_part(
-                reader, part.size, name, caption_for(file, part, total, path), progress=_cb,
+                reader, size, name, caption_for(file, part, total, path), progress=_cb,
                 connections=max(1, min(16, connections)))
         part.message_id = message_id
         part.uploaded_at = datetime.utcnow()
@@ -239,6 +243,22 @@ class TransferWorker:
             pass
         if done and file.status == FileStatus.READY:
             logger.info("File %s (%s) is in the channel: %d part(s)", file.id, file.name, total)
+
+    async def _maybe_encrypt(self, db, file: File, part: FilePart, raw):
+        """Wrap the plaintext reader when the file is encrypted. The salt is
+        fixed per part (kept on retries so the caption stays truthful)."""
+        if not file.encrypted:
+            return raw, part.size
+        key = await crypto.get_key(db)
+        if key is None or crypto.key_id_of(key) != file.key_id:
+            raise RuntimeError("content key for this file is not available (key id %s)" % file.key_id)
+        salt = bytes.fromhex(part.enc_salt) if part.enc_salt else None
+        enc = crypto.EncryptingReader(raw, part.size, key, salt)
+        if part.enc_salt is None:
+            part.enc_salt = enc.salt.hex()
+            part.enc_size = enc.size
+            await db.commit()
+        return enc, enc.size
 
     async def _handle_failure(self, db, file: File, e: Exception, max_retries: int) -> None:
         wait = getattr(e, "seconds", None)
@@ -315,9 +335,10 @@ class TransferWorker:
                 progress.set(file.id, _idx, sent, size)
 
             progress.set(file.id, part.index, 0, part.size)
-            with RangeReader(file.staging_path, part.offset, part.size, name=name) as reader:
+            with RangeReader(file.staging_path, part.offset, part.size, name=name) as raw:
+                reader, size = await self._maybe_encrypt(db, file, part, raw)
                 message_id = await self.manager.upload_part(
-                    reader, part.size, name, caption_for(file, part, total, path), progress=_cb,
+                    reader, size, name, caption_for(file, part, total, path), progress=_cb,
                     connections=max(1, min(16, connections)))
             part.message_id = message_id
             part.uploaded_at = datetime.utcnow()

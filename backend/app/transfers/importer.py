@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app import config, db as _db
+from app import config, crypto, db as _db
 from app.models import File, FilePart, FileStatus, Folder
 from app.transfers import staging, zipstream
 from app.transfers.io import plan_parts
@@ -89,12 +89,19 @@ async def _ensure_path(db, owner_id: int, parent_id: int | None, rel_dir: str) -
     return parent_id
 
 
+async def _enc_fields(db) -> dict:
+    if not await crypto.encrypt_new_files(db):
+        return {"encrypted": False, "key_id": None}
+    key = await crypto.ensure_key(db)
+    return {"encrypted": True, "key_id": crypto.key_id_of(key)}
+
+
 async def import_file(db, owner_id: int, folder_id: int | None, src: Path, part_size: int) -> File:
     size = src.stat().st_size
     import mimetypes
     f = File(owner_id=owner_id, folder_id=folder_id, name=src.name[:255], size=size,
              mime_type=mimetypes.guess_type(src.name)[0], part_size=part_size,
-             status=FileStatus.QUEUED, staging_path=str(src), keep_source=True)
+             status=FileStatus.QUEUED, staging_path=str(src), keep_source=True, **(await _enc_fields(db)))
     db.add(f)
     await db.flush()
     return f
@@ -117,7 +124,8 @@ async def start_zip(db, owner_id: int, folder_id: int | None, src_dir: Path, nam
     created = datetime.utcnow()
     layout = zipstream.plan(manifest, created)
     f = File(owner_id=owner_id, folder_id=folder_id, name=name, size=layout.total, mime_type="application/zip",
-             is_archive=True, part_size=part_size, status=FileStatus.RECEIVING, created_at=created)
+             is_archive=True, part_size=part_size, status=FileStatus.RECEIVING, created_at=created,
+             **(await _enc_fields(db)))
     db.add(f)
     await db.flush()
     for index, offset, length in plan_parts(layout.total, part_size):

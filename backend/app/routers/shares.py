@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import config, security, settings_store
+from app import config, crypto, security, settings_store
 from app.db import get_db
 from app.models import File, FileStatus, Share, User
 from app.routers.files import _own_file, stream_file
@@ -182,4 +182,4 @@ async def public_share_download(token: str, request: Request, grant: str | None 
         s.download_count += 1
     s.last_access_at = datetime.utcnow()
     await db.commit()
-    return stream_file(s.file, request)
+    return stream_file(s.file, request, await crypto.get_key(db) if s.file.encrypted else None)

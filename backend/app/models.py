@@ -109,6 +109,10 @@ class File(Base):
     # mismatch ever observed (on download or verify). NULL = fine so far.
     verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     integrity_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # Content encryption (see app/crypto.py). key_id identifies which content
+    # key the parts were encrypted with.
+    encrypted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    key_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     parts: Mapped[list["FilePart"]] = relationship(
         back_populates="file", cascade="all, delete-orphan", order_by="FilePart.index"
@@ -134,6 +138,9 @@ class FilePart(Base):
     # part is read from the parent File's whole-file staging (archives).
     received: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     staging_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Encrypted parts: per-part salt (hex) and the ciphertext size in the channel.
+    enc_salt: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    enc_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     file: Mapped[File] = relationship(back_populates="parts")
 

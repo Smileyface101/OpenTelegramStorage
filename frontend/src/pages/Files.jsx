@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import {
   Folder, FolderOpen, FolderPlus, FolderUp, Upload, Download, Trash2, Pencil, Archive, RefreshCw, ChevronRight, ChevronDown,
-  Search, FolderInput, ArrowUp, ArrowDown, X, Home, CornerLeftUp, Image, Film, Music, FileText, FileArchive, File as FileIcon, HardDrive, ShieldCheck, ShieldAlert, ShieldQuestion, Link2, Copy, Trash,
+  Search, FolderInput, ArrowUp, ArrowDown, X, Home, CornerLeftUp, Image, Film, Music, FileText, FileArchive, File as FileIcon, HardDrive, ShieldCheck, ShieldAlert, ShieldQuestion, Link2, Copy, Trash, Lock,
 } from 'lucide-react'
 import { get, post, del, patch } from '../lib/api'
 import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, itemsFromDirectoryPicker, supportsDirectoryPicker, supportsFilePicker, pickFilesWithHandles, rootFolderName } from '../lib/uploader'
@@ -418,6 +418,7 @@ export default function Files({ user }) {
                           <div className="flex items-center gap-2 min-w-0">{f.is_archive ? <FileArchive size={18} className="text-amber-300 shrink-0" /> : fileIcon(f.name)}
                             <span className="truncate">{f.name}</span>
                             {f.parts_total > 1 && <span className="text-xs text-ink-400 shrink-0">{f.parts_total} parts</span>}
+                            {f.encrypted && <Lock size={12} className="text-ink-500 shrink-0" title="Encrypted before it reached Telegram" />}
                             <Integrity f={f} /></div>
                           {f.integrity_error && <div className="text-xs text-red-300 mt-1 truncate">Integrity: {f.integrity_error}</div>}
                           {f.status !== 'ready' && f.status !== 'failed' && (

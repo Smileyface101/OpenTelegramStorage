@@ -105,6 +105,7 @@ class SettingsUpdate(BaseModel):
     upload_connections: int | None = Field(default=None, ge=1, le=16)
     stale_upload_hours: int | None = Field(default=None, ge=0, le=24 * 365)
     public_url: str | None = Field(default=None, max_length=300)
+    encrypt_new: bool | None = None
 
 
 class UploadComplete(BaseModel):
@@ -144,3 +145,12 @@ class ShareCreate(BaseModel):
 
 class SharePassword(BaseModel):
     password: str = Field(max_length=128)
+
+
+class KeyExport(BaseModel):
+    password: str
+
+
+class KeyImport(BaseModel):
+    key: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    password: str

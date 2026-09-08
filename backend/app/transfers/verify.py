@@ -13,7 +13,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import selectinload
 
-from app import db as _db
+from app import crypto, db as _db
 from app.models import File
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,10 @@ async def verify_file(manager, file_id: str) -> None:
             parts = sorted(f.parts, key=lambda p: p.index)
             whole = hashlib.sha256()
             problems: list[str] = []
+            key = await crypto.get_key(db) if f.encrypted else None
+            if f.encrypted and (key is None or crypto.key_id_of(key) != f.key_id):
+                problems.append("content key not available; cannot decrypt")
+                parts = []
             for p in parts:
                 if p.message_id is None:
                     problems.append(f"part {p.index + 1} is not in the channel")
@@ -50,12 +54,16 @@ async def verify_file(manager, file_id: str) -> None:
                 got = 0
                 try:
                     doc = await manager.get_document(p.message_id)
-                    async for chunk in manager.iter_download(doc, 0, p.size):
+                    source = crypto.decrypt_range(manager, doc, p, key, 0, p.size) if f.encrypted else manager.iter_download(doc, 0, p.size)
+                    async for chunk in source:
                         h.update(chunk)
                         whole.update(chunk)
                         got += len(chunk)
                 except FileNotFoundError:
                     problems.append(f"part {p.index + 1}: message {p.message_id} is missing from the channel")
+                    continue
+                except Exception as e:  # noqa: BLE001 - a bad tag means tampered/corrupt ciphertext
+                    problems.append(f"part {p.index + 1}: {'decryption failed (tampered or corrupt)' if f.encrypted else str(e)}")
                     continue
                 if got != p.size:
                     problems.append(f"part {p.index + 1}: got {got} bytes, expected {p.size}")

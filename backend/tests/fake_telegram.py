@@ -61,3 +61,17 @@ class FakeManager:
 
     def stored_bytes(self) -> bytes:
         return b"".join(v[1] for _k, v in sorted(self.messages.items()))
+
+    def plaintext_bytes(self, key: bytes | None) -> bytes:
+        """What the channel holds, decrypted where captions say so."""
+        from app import crypto
+        out = b""
+        for _k, (_name, blob, cap) in sorted(self.messages.items()):
+            enc = cap.get("enc")
+            if enc and key is not None:
+                salt = crypto.parse_header(blob[:crypto.HEADER])
+                dec = crypto.BlockDecryptor(key, salt, 0, int(cap["psize"]))
+                out += dec.feed(blob[crypto.HEADER:]) + dec.finish()
+            else:
+                out += blob
+        return out

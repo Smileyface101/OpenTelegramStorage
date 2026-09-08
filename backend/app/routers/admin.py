@@ -5,13 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import asyncio
 
-from app import config, maintenance, recovery, security, settings_store, status as status_mod
+from app import config, crypto, maintenance, recovery, security, settings_store, status as status_mod
 from app.transfers import importer
 from app.telegram.manager import manager
 from app.db import get_db
 from app.models import Session, User, UserRole
 from app.routers.common import user_out
-from app.schemas import ImportRequest, SettingsUpdate, UserCreate
+from app.schemas import ImportRequest, KeyExport, KeyImport, SettingsUpdate, UserCreate
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -38,6 +38,10 @@ async def update_settings(data: SettingsUpdate, db: AsyncSession = Depends(get_d
         await settings_store.set(db, "transfer.stale_upload_hours", str(data.stale_upload_hours))
     if data.public_url is not None:
         await settings_store.set(db, "app.public_url", data.public_url.strip().rstrip("/"))
+    if data.encrypt_new is not None:
+        await settings_store.set(db, "content.encrypt_new", "true" if data.encrypt_new else "false")
+        if data.encrypt_new:
+            await crypto.ensure_key(db)
     await db.commit()
     return await settings_store.public_settings(db)
 
@@ -184,3 +188,42 @@ async def system_status(user: User = Depends(security.current_admin)):
 async def run_cleanup(user: User = Depends(security.current_admin)):
     """Remove abandoned uploads and orphaned staging files now."""
     return await maintenance.cleanup(manager)
+
+
+@router.get("/encryption")
+async def encryption_status(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
+    from app.models import File
+    key = await crypto.get_key(db)
+    kid = crypto.key_id_of(key) if key else None
+    n_enc = await db.scalar(select(func.count(File.id)).where(File.encrypted == True))  # noqa: E712
+    n_other = await db.scalar(select(func.count(File.id)).where(File.encrypted == True, File.key_id != kid)) if kid else 0  # noqa: E712
+    return {"encrypt_new": await crypto.encrypt_new_files(db), "has_key": key is not None, "key_id": kid,
+            "encrypted_files": n_enc or 0, "files_with_other_key": n_other or 0}
+
+
+@router.post("/encryption/export")
+async def encryption_export(data: KeyExport, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
+    """Reveal the content key (hex). Requires the admin's password."""
+    if not security.verify_password(data.password, user.password_hash):
+        raise HTTPException(400, "Password is incorrect")
+    key = await crypto.get_key(db)
+    if key is None:
+        raise HTTPException(404, "No content key exists yet")
+    return {"key": key.hex(), "key_id": crypto.key_id_of(key)}
+
+
+@router.post("/encryption/import")
+async def encryption_import(data: KeyImport, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
+    """Install a content key (recovery on a new machine, or after losing the
+    data volume). Refused if files encrypted with the current key exist."""
+    from app.models import File
+    if not security.verify_password(data.password, user.password_hash):
+        raise HTTPException(400, "Password is incorrect")
+    current = await crypto.get_key(db)
+    if current is not None:
+        n = await db.scalar(select(func.count(File.id)).where(File.key_id == crypto.key_id_of(current)))
+        if n:
+            raise HTTPException(409, f"{n} file(s) are encrypted with the current key; replacing it would make them unreadable")
+    await crypto.set_key(db, bytes.fromhex(data.key))
+    await db.commit()
+    return {"key_id": crypto.key_id_of(bytes.fromhex(data.key))}

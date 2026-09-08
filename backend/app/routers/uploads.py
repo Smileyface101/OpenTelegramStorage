@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import config, security, settings_store
+from app import config, crypto, security, settings_store
 from app.db import get_db
 from app.models import Bundle, File, FilePart, FileStatus, Folder, Upload, UploadStatus, User
 from app.routers.common import file_out
@@ -44,6 +44,14 @@ def _safe_rel_path(path: str | None, name: str) -> str | None:
     parts[-1] = name
     rel = "/".join(parts)
     return rel if rel != name else None
+
+
+async def _enc_fields(db: AsyncSession) -> dict:
+    """encrypted/key_id for a new File, per the 'encrypt new uploads' setting."""
+    if not await crypto.encrypt_new_files(db):
+        return {"encrypted": False, "key_id": None}
+    key = await crypto.ensure_key(db)
+    return {"encrypted": True, "key_id": crypto.key_id_of(key)}
 
 
 def _check_space(size: int) -> None:
@@ -145,7 +153,7 @@ async def init_upload(data: UploadInit, db: AsyncSession = Depends(get_db), user
         part_size = await settings_store.part_size_bytes(db)
         _check_space(min(data.size, (staging.MAX_STAGED_PARTS + 1) * part_size))
         f = File(owner_id=user.id, folder_id=data.folder_id, name=name, size=data.size, mime_type=up.mime_type,
-                 part_size=part_size, status=FileStatus.RECEIVING)
+                 part_size=part_size, status=FileStatus.RECEIVING, **(await _enc_fields(db)))
         db.add(f)
         await db.flush()
         for index, offset, length in plan_parts(data.size, part_size):
@@ -439,7 +447,7 @@ async def create_bundle(data: BundleCreate, db: AsyncSession = Depends(get_db), 
     part_size = await settings_store.part_size_bytes(db)
     _check_space(min(layout.total, (staging.MAX_STAGED_PARTS + 1) * part_size))
     f = File(owner_id=user.id, folder_id=data.folder_id, name=name, size=layout.total, mime_type="application/zip",
-             is_archive=True, part_size=part_size, status=FileStatus.RECEIVING)
+             is_archive=True, part_size=part_size, status=FileStatus.RECEIVING, **(await _enc_fields(db)))
     db.add(f)
     await db.flush()
     for index, offset, length in plan_parts(layout.total, part_size):

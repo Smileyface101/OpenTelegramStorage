@@ -6,6 +6,7 @@ import pytest
 
 from app import config
 from app.transfers import worker as transfer_worker
+from tests.conftest import stored_plaintext
 from tests.test_transfers import _drain
 
 
@@ -52,7 +53,7 @@ async def test_import_file_reads_in_place(api, admin, fake_manager, import_dir):
     f = (await api.get(f"/api/files/{f['id']}")).json()
     assert f["status"] == "ready" and f["parts_total"] == 2
     assert (import_dir / "videos" / "a.mkv").exists(), "source must never be deleted"
-    assert fake_manager.stored_bytes() == (import_dir / "videos" / "a.mkv").read_bytes()
+    assert await stored_plaintext(fake_manager) == (import_dir / "videos" / "a.mkv").read_bytes()
     await api.delete(f"/api/files/{f['id']}")
     assert (import_dir / "videos" / "a.mkv").exists()
 

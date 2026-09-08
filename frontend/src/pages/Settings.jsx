@@ -12,6 +12,7 @@ export default function Settings({ user, onChange }) {
       {isAdmin && <SystemSection onChange={onChange} />}
       {isAdmin && <TelegramSection onChange={onChange} />}
       {isAdmin && <TransferSection />}
+      {isAdmin && <EncryptionSection />}
       {isAdmin && <RecoverySection />}
       <SharesSection />
       <PasswordSection />
@@ -365,6 +366,66 @@ function SharesSection() {
         </ul>
       )}
       <Alert>{error}</Alert>
+    </Section>
+  )
+}
+
+function EncryptionSection() {
+  const [st, setSt] = useState(null)
+  const [shown, setShown] = useState(null)   // exported key
+  const [imp, setImp] = useState(null)       // { key, password }
+  const [error, setError] = useState('')
+  const [msg, setMsg] = useState('')
+  const load = () => get('/api/admin/encryption').then(setSt).catch((e) => setError(e.message))
+  useEffect(() => { load() }, [])
+  const toggle = async () => {
+    setError(''); setMsg('')
+    try { await put('/api/admin/settings', { encrypt_new: !st.encrypt_new }); await load() } catch (e) { setError(e.message) }
+  }
+  const exportKey = async () => {
+    const password = prompt('Enter your password to reveal the content key:')
+    if (!password) return
+    setError('')
+    try { setShown(await post('/api/admin/encryption/export', { password })) } catch (e) { setError(e.message) }
+  }
+  const doImport = async (e) => {
+    e.preventDefault(); setError(''); setMsg('')
+    try { const r = await post('/api/admin/encryption/import', imp); setImp(null); setMsg(`Key ${r.key_id} installed.`); load() } catch (err) { setError(err.message) }
+  }
+  if (!st) return null
+  return (
+    <Section title="Content encryption">
+      <p className="text-sm text-ink-300">
+        {st.encrypt_new ? 'On: new uploads are encrypted on this server before they reach Telegram (AES-256-GCM, per-part keys). Telegram only ever holds ciphertext.' : 'Off: new uploads are stored in the channel as-is. Anyone with access to the channel can read them.'}
+        {' '}{st.encrypted_files > 0 && <>{st.encrypted_files} encrypted file{st.encrypted_files === 1 ? '' : 's'} so far.</>}
+      </p>
+      <div className="flex flex-wrap gap-2 items-center">
+        <button className={st.encrypt_new ? 'btn-ghost' : 'btn-primary'} onClick={toggle}>{st.encrypt_new ? 'Turn off for new uploads' : 'Turn on'}</button>
+        {st.has_key && <button className="btn-ghost" onClick={exportKey}>Export key</button>}
+        {!imp && <button className="btn-ghost" onClick={() => setImp({ key: '', password: '' })}>Import key</button>}
+        {st.key_id && <span className="text-xs text-ink-400">key id <code className="bg-ink-800 px-1 rounded">{st.key_id}</code></span>}
+      </div>
+      {st.has_key && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-100 space-y-1">
+          <div className="font-medium">Back up the content key.</div>
+          <p className="text-xs">The key lives only in this server's data directory, encrypted with the master key. If the data volume is lost without a copy of the content key, every encrypted file in the channel becomes permanently unreadable. Export it once and keep it with your other secrets. Recovery on a new machine: import the key, then run "Rebuild index from channel".</p>
+        </div>
+      )}
+      {shown && (
+        <div className="rounded-lg border border-ink-700 p-3 space-y-2">
+          <div className="text-xs uppercase tracking-wide text-ink-400">Content key (hex, key id {shown.key_id})</div>
+          <code className="block break-all text-sm select-all">{shown.key}</code>
+          <div className="flex gap-2"><button className="btn-ghost" onClick={() => navigator.clipboard?.writeText(shown.key)}>Copy</button><button className="btn-ghost" onClick={() => setShown(null)}>Hide</button></div>
+        </div>
+      )}
+      {imp && (
+        <form onSubmit={doImport} className="space-y-2">
+          <p className="text-xs text-ink-400">Paste a previously exported key (64 hex characters). Refused while files encrypted with the current key exist.</p>
+          <input className="input font-mono" placeholder="content key (hex)" value={imp.key} onChange={(e) => setImp({ ...imp, key: e.target.value.trim() })} />
+          <div className="flex gap-2"><input className="input" type="password" placeholder="your password" autoComplete="current-password" value={imp.password} onChange={(e) => setImp({ ...imp, password: e.target.value })} /><button className="btn-primary" disabled={imp.key.length !== 64 || !imp.password}>Install</button><button type="button" className="btn-ghost" onClick={() => setImp(null)}>Cancel</button></div>
+        </form>
+      )}
+      <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
     </Section>
   )
 }

@@ -110,3 +110,13 @@ async def admin(api):
     r = await api.post("/api/setup/admin", json={"username": "admin", "password": "correct horse battery"})
     assert r.status_code == 200, r.text
     return r.json()
+
+
+async def content_key():
+    from app import crypto
+    async with _db.async_session() as db:
+        return await crypto.get_key(db)
+
+
+async def stored_plaintext(fm) -> bytes:
+    return fm.plaintext_bytes(await content_key())
