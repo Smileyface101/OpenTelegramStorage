@@ -29,6 +29,7 @@ from app import settings_store
 
 logger = logging.getLogger(__name__)
 
+BOTINFO_KEY = "ots:channel="   # marker line kept in the bot's own description
 TEST_MESSAGE = "OpenTelegramStorage connected to this channel ✅ (this message will be deleted)"
 
 
