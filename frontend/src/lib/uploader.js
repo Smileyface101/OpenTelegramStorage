@@ -149,14 +149,36 @@ export async function uploadBundle(items, { name, folderId = null, onProgress, o
   })
   onInit?.({ file_id: bundle.file_id })
   const total = items.reduce((a, it) => a + it.file.size, 0)
+  const SMALL = 8 * 1024 * 1024
   let doneBefore = 0
+  let lastReport = 0
   try {
     for (let i = 0; i < items.length; i++) {
       const { file } = items[i]
       const member = bundle.members[i]
-      await uploadFile(file, { folderId, bundleId: bundle.id, path: member.path, memberIndex: i, signal, onStatus,
-        onProgress: (d) => onProgress?.(doneBefore + d, total) })
+      if (file.size <= SMALL) {
+        // One request per small file: init + bytes + descriptor in a single PUT.
+        let tries = 0
+        for (;;) {
+          if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+          try {
+            await api(`/api/bundles/${bundle.id}/members/${i}`, { method: 'PUT', body: file, signal, headers: { 'Content-Type': 'application/octet-stream' } })
+            break
+          } catch (e) {
+            if (signal?.aborted) throw e
+            if (e instanceof ApiError && e.status === 429) { onStatus?.('waiting'); await sleep((e.detail?.retry_after || 2) * 1000); continue }
+            if (++tries >= MAX_TRIES) throw e
+            await sleep(1000 * tries)
+          }
+        }
+        onStatus?.('uploading')
+      } else {
+        await uploadFile(file, { folderId, bundleId: bundle.id, path: member.path, memberIndex: i, signal, onStatus,
+          onProgress: (d) => onProgress?.(doneBefore + d, total) })
+      }
       doneBefore += file.size
+      const now = Date.now()
+      if (now - lastReport > 200 || i === items.length - 1) { lastReport = now; onProgress?.(doneBefore, total) }
     }
     return api(`/api/bundles/${bundle.id}/complete`, { method: 'POST', signal })
   } catch (e) {

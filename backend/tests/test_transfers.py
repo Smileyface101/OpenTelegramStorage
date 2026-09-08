@@ -343,3 +343,26 @@ async def test_cancel_receiving_upload_removes_channel_parts(api, admin, fake_ma
     assert fake_manager.deleted == [100]
     assert (await api.get(f"/api/files/{up['file_id']}")).status_code == 404
     assert not list(config.STAGING_DIR.glob(f"{up['file_id']}.p*"))
+
+
+async def test_bundle_single_request_members(api, admin, fake_manager):
+    """Small members go up in one request each; result is a valid archive."""
+    await api.put("/api/admin/settings", json={"part_size_mb": 1})
+    members = {f"lua/{i}.lua": os.urandom(30_000 + i) for i in range(60)}  # ~1.8 MB -> 2 parts
+    b = (await api.post("/api/bundles", json={"name": "addons", "members": [{"path": p, "size": len(d)} for p, d in members.items()]})).json()
+    for i, (p, d) in enumerate(members.items()):
+        while True:
+            r = await api.put(f"/api/bundles/{b['id']}/members/{i}", content=d, headers={"Content-Type": "application/octet-stream"})
+            if r.status_code == 429:
+                assert await transfer_worker.worker.process_one(); continue
+            assert r.status_code == 200, r.text
+            break
+    # Retrying a finished member is a no-op; out of order is refused.
+    assert (await api.put(f"/api/bundles/{b['id']}/members/3", content=list(members.values())[3])).json()["done"] is True
+    assert (await api.put(f"/api/bundles/{b['id']}/members/70", content=b"x")).status_code == 400
+    f = (await api.post(f"/api/bundles/{b['id']}/complete")).json()["file"]
+    await _drain(transfer_worker.worker)
+    r = await api.get(f"/api/files/{f['id']}/download")
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        assert zf.testzip() is None and len(zf.namelist()) == 60
+        assert zf.read("lua/7.lua") == members["lua/7.lua"]

@@ -73,7 +73,7 @@ def write_range(file: File, parts: list[FilePart], offset: int, data: bytes) -> 
     pos = offset
     view = memoryview(data)
     while view:
-        part = parts[pos // file.part_size] if file.part_size else parts[0]
+        part = _part_for(parts, file, pos)
         if part.staging_path is None:
             part.staging_path = part_path(file.id, part.index)
         local = pos - part.offset
@@ -121,8 +121,14 @@ def remove_part_files(parts: list[FilePart]) -> None:
 # point its digest is final and the worker may ship it.
 # ---------------------------------------------------------------------------
 
-def _part_for(parts: list[FilePart], file: File, pos: int) -> FilePart:
-    return parts[pos // file.part_size] if file.part_size else parts[0]
+def _part_for(parts, file: File, pos: int) -> FilePart:
+    """`parts` is a list indexed by position or a {index: part} dict covering
+    the range being written (large files are not loaded whole per request)."""
+    idx = pos // file.part_size if file.part_size else 0
+    try:
+        return parts[idx]
+    except (KeyError, IndexError):
+        raise IOError(f"part {idx} not loaded for offset {pos}")
 
 
 def write_at(file: File, parts: list[FilePart], offset: int, data: bytes) -> None:
