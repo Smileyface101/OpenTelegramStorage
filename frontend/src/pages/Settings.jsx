@@ -31,7 +31,13 @@ function Section({ title, children }) {
 function TelegramSection({ onChange }) {
   const [status, setStatus] = useState(null)
   const [mode, setMode] = useState(null) // null | 'bot' | 'channel'
+  const [creds, setCreds] = useState(null)
   const load = async () => setStatus(await get('/api/telegram/status'))
+  const reveal = async () => {
+    const password = prompt('Enter your password to show the Telegram credentials:')
+    if (!password) return
+    try { setCreds(await post('/api/telegram/reveal', { password })) } catch (e) { alert(e.message) }
+  }
   useEffect(() => { load() }, [])
   const disconnect = async () => {
     if (!confirm('Forget the bot credentials and channel? Files stay in the channel; you can reconnect later.')) return
@@ -48,8 +54,20 @@ function TelegramSection({ onChange }) {
       <div className="flex flex-wrap gap-2">
         <button className="btn-ghost" onClick={() => setMode(mode === 'bot' ? null : 'bot')}>{status.configured ? 'Change bot' : 'Connect bot'}</button>
         {status.connected && <button className="btn-ghost" onClick={() => setMode(mode === 'channel' ? null : 'channel')}>Change channel</button>}
+        {status.configured && <button className="btn-ghost" onClick={() => (creds ? setCreds(null) : reveal())}>{creds ? 'Hide credentials' : 'Show credentials'}</button>}
         {status.configured && <button className="btn-danger" onClick={disconnect}>Disconnect</button>}
       </div>
+      {creds && (
+        <div className="rounded-lg border border-ink-700 p-3 text-sm space-y-1">
+          <div className="text-xs text-ink-400">For setting up another server on the same channel. Keep these secret.</div>
+          <div className="grid grid-cols-[110px_1fr] gap-y-1 font-mono text-xs">
+            <span className="text-ink-400 font-sans">API id</span><code className="select-all">{creds.api_id}</code>
+            <span className="text-ink-400 font-sans">API hash</span><code className="select-all break-all">{creds.api_hash}</code>
+            <span className="text-ink-400 font-sans">Bot token</span><code className="select-all break-all">{creds.bot_token}</code>
+            <span className="text-ink-400 font-sans">Channel</span><code className="select-all">{creds.channel_title} ({creds.channel_id})</code>
+          </div>
+        </div>
+      )}
       {mode === 'bot' && <BotStep onNext={async () => { setMode('channel'); await load(); onChange() }} />}
       {mode === 'channel' && <ChannelStep onDone={async () => { setMode(null); await load(); onChange() }} />}
     </Section>

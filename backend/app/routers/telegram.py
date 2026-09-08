@@ -5,7 +5,10 @@ from telethon.errors import RPCError
 
 from app import security
 from app.models import User
-from app.schemas import ChannelSelect, TelegramConnect
+from app.schemas import ChannelSelect, KeyExport, TelegramConnect
+from app import settings_store
+from app.db import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.telegram.manager import TelegramNotConfigured, manager
 
 router = APIRouter(prefix="/api/telegram", tags=["telegram"])
@@ -63,3 +66,18 @@ async def reconnect(user: User = Depends(security.current_admin)):
     """Drop the current MTProto session and connect again with the stored credentials."""
     await manager.reconnect()
     return status_out()
+
+
+@router.post("/reveal")
+async def reveal_credentials(data: KeyExport, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
+    """Show the stored API id/hash and bot token (password required), e.g. to
+    set up a second server on the same channel."""
+    if not security.verify_password(data.password, user.password_hash):
+        raise HTTPException(400, "Password is incorrect")
+    return {
+        "api_id": await settings_store.get(db, "telegram.api_id"),
+        "api_hash": await settings_store.get(db, "telegram.api_hash"),
+        "bot_token": await settings_store.get(db, "telegram.bot_token"),
+        "channel_id": await settings_store.get(db, "telegram.channel_id"),
+        "channel_title": await settings_store.get(db, "telegram.channel_title"),
+    }
