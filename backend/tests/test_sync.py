@@ -129,3 +129,70 @@ async def test_shared_mode_makes_files_visible_to_all_local_users(api, admin, fa
     await api.post("/api/auth/login", json={"username": "bob", "password": "bobs long password"})
     assert (await api.get(f"/api/files/{f['id']}")).status_code == 200
     assert [x["name"] for x in (await api.get("/api/files")).json()["files"]] == ["team.bin"]
+
+
+def _events(fm, since: set):
+    return [json.loads(fm.messages[m][2]) for m in sorted(set(fm.messages) - since) if fm.messages[m][1] is None]
+
+
+async def test_rename_and_move_events_apply_with_lww(api, admin, fake_manager):
+    await api.put("/api/admin/settings", json={"workspace_mode": "shared", "workspace_name": "home"})
+    fid, ids = _other_server_uploads(fake_manager, "draft.txt", b"d" * 10, 10, path="Docs")
+    for mid, cap, size in ids:
+        await sync.handle_post(mid, json.dumps(cap), size)
+    # Rename + move from the other server.
+    for ev in [sync.make_event("rename", id=fid, name="final.txt", by="laptop/alice"),
+               sync.make_event("folder_create", path="Archive/2026", by="laptop/alice"),
+               sync.make_event("move", id=fid, path="Archive/2026", by="laptop/alice")]:
+        mid = await fake_manager.send_text(ev)
+        await sync.handle_post(mid, ev, None)
+    f = (await api.get(f"/api/files/{fid}")).json()
+    assert f["name"] == "final.txt"
+    tree = (await api.get("/api/folders/tree")).json()
+    assert [(t["name"], t["depth"]) for t in tree] == [("Archive", 0), ("2026", 1), ("Docs", 0)]
+    inside = (await api.get("/api/files", params={"folder_id": tree[1]["id"]})).json()
+    assert [x["name"] for x in inside["files"]] == ["final.txt"]
+    # An OLDER event must not undo the newer rename (last writer wins).
+    old = json.loads(sync.make_event("rename", id=fid, name="stale.txt")); old["ts"] = "2000-01-01T00:00:00"
+    mid = await fake_manager.send_text(json.dumps(old)); await sync.handle_post(mid, json.dumps(old), None)
+    assert (await api.get(f"/api/files/{fid}")).json()["name"] == "final.txt"
+    # Folder rename/move from the other server.
+    for ev in [sync.make_event("folder_rename", path="Archive/2026", name="Y2026", by="laptop/alice"),
+               sync.make_event("folder_move", path="Archive/Y2026", to="Docs", by="laptop/alice")]:
+        mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
+    tree = (await api.get("/api/folders/tree")).json()
+    assert [(t["name"], t["depth"]) for t in tree] == [("Archive", 0), ("Docs", 0), ("Y2026", 1)]
+    # Deleting a folder that still has files is refused until its files are gone.
+    ev = sync.make_event("folder_delete", path="Docs/Y2026"); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
+    assert any(t["name"] == "Y2026" for t in (await api.get("/api/folders/tree")).json())
+    ev = sync.make_event("delete", id=fid); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
+    ev = sync.make_event("folder_delete", path="Docs/Y2026"); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
+    assert not any(t["name"] == "Y2026" for t in (await api.get("/api/folders/tree")).json())
+
+
+async def test_local_changes_emit_events_and_echo_is_harmless(api, admin, fake_manager):
+    await api.put("/api/admin/settings", json={"workspace_mode": "shared", "workspace_name": "home"})
+    f = (await _upload(api, "notes.txt", b"n" * 100))["file"]
+    await _drain(transfer_worker.worker)
+    since = set(fake_manager.messages)
+    folder = (await api.post("/api/folders", json={"name": "Inbox"})).json()
+    assert (await api.patch(f"/api/files/{f['id']}", json={"name": "renamed.txt"})).status_code == 200
+    assert (await api.post(f"/api/files/{f['id']}/move", json={"folder_id": folder["id"]})).status_code == 200
+    assert (await api.patch(f"/api/folders/{folder['id']}", json={"name": "Outbox"})).status_code == 200
+    evs = _events(fake_manager, since)
+    assert [e["t"] for e in evs] == ["folder_create", "rename", "move", "folder_rename"]
+    assert evs[1]["name"] == "renamed.txt" and evs[2]["path"] == "Inbox" and evs[3] == {**evs[3], "path": "Inbox", "name": "Outbox"}
+    assert all(e["by"] == "home/admin" for e in evs)
+    # The channel echoes our own events back: nothing changes, nothing reverts.
+    for m in sorted(set(fake_manager.messages) - since):
+        await sync.handle_post(m, fake_manager.messages[m][2], None)
+    g = (await api.get(f"/api/files/{f['id']}")).json()
+    assert g["name"] == "renamed.txt" and g["folder_id"] == folder["id"]
+    assert [t["name"] for t in (await api.get("/api/folders/tree")).json()] == ["Outbox"]
+    # Bulk move + folder delete emit too.
+    since = set(fake_manager.messages)
+    top = (await api.post("/api/folders", json={"name": "Top"})).json()
+    await api.post("/api/move", json={"folder_ids": [folder["id"]], "target_folder_id": top["id"]})
+    await api.delete(f"/api/folders/{top['id']}")
+    kinds = [e["t"] for e in _events(fake_manager, since)]
+    assert kinds == ["folder_create", "folder_move", "delete", "folder_delete"]

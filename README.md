@@ -87,8 +87,8 @@ building locally.
   browser or a copy.
 - **Shared workspaces.** Several servers can use the same bot and channel.
   Choose "shared" in the setup wizard and files uploaded from any of them
-  appear on all of them within seconds, deletions propagate, and a server
-  that was offline catches up on restart.
+  appear on all of them within seconds, deletions, renames and moves
+  propagate, and a server that was offline catches up on restart.
 - **Locked down.** Password login with lockout, optional two-factor (TOTP)
   with recovery codes, per-device session list, admin-managed users who only
   see their own files, credentials and content key encrypted at rest.
@@ -200,9 +200,8 @@ paste the new one in Settings, and consider a fresh channel.
 **Can two servers share one channel?**
 Yes. Install the second one, enter the same bot credentials, pick the same
 channel, answer "yes" to the sharing question, and import the content key
-if encryption is on. Uploads and deletions sync both ways. Renames and moves
-are still local to each server; folder structure comes from the path each
-file was uploaded to.
+if encryption is on. Uploads, deletions, renames, moves and folder changes
+sync both ways; give every server a different name.
 
 **Can I use an existing channel?**
 Yes, but every upload becomes a message in it, so a dedicated private channel

@@ -186,10 +186,10 @@ export function SharingStep({ onDone, onBack }) {
       </label>
       <label className={`block rounded-lg border p-3 cursor-pointer ${mode === 'shared' ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
         <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={mode === 'shared'} onChange={() => setMode('shared')} /> Yes, share it with other servers or people</div>
-        <p className="text-xs text-ink-400 mt-1">The channel becomes a shared drive. Files uploaded from any server connected to it appear here within seconds, deletions propagate, and every user on this server sees everything. Anyone who holds the bot token can read the channel anyway, so this is the honest model for a shared setup.</p>
+        <p className="text-xs text-ink-400 mt-1">The channel becomes a shared drive. Files uploaded from any server connected to it appear here within seconds; deletions, renames and moves propagate; every user on this server sees everything. Anyone who holds the bot token can read the channel anyway, so this is the honest model for a shared setup.</p>
         {mode === 'shared' && (
           <div className="mt-2">
-            <label className="label">Name of this server (shown next to files it uploads)</label>
+            <label className="label">Name of this server (shown next to files it uploads; must be unique among the servers sharing the channel)</label>
             <input className="input" placeholder="e.g. home, laptop, office" value={name} onChange={(e) => setName(e.target.value)} />
             <p className="text-xs text-ink-400 mt-1">To connect a second server: install it, paste the same API id, hash and bot token, pick the same channel, choose "Yes" here, and import the content key from Settings → Content encryption if encryption is on.</p>
           </div>

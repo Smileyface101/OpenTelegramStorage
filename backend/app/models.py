@@ -74,6 +74,8 @@ class Folder(Base):
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id", ondelete="CASCADE"), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    # Shared workspaces: when this folder's name/parent last changed (LWW).
+    meta_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class FileStatus(str, enum.Enum):
@@ -116,6 +118,8 @@ class File(Base):
     key_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # "server/username" that uploaded it (from the caption); shown in shared workspaces.
     uploaded_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Shared workspaces: when name/folder last changed, for last-writer-wins.
+    meta_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     parts: Mapped[list["FilePart"]] = relationship(
         back_populates="file", cascade="all, delete-orphan", order_by="FilePart.index"

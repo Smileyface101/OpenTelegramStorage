@@ -187,8 +187,14 @@ servers (`app/sync.py`):
   message id; the file becomes `READY` when all parts are present. Posts for
   the server's own uploads are recognised by file id and ignored.
 * **Events.** Metadata changes that captions cannot express are posted as
-  small JSON messages (`{"ots-ev":1,"t":"delete","id":…,"ts":…,"by":…}`) and
-  applied by the others. Delete is implemented; rename and move are local.
+  small JSON messages (`{"ots-ev":1,"t":…,"ts":…,"by":…}`) and applied by the
+  others: `delete`, `rename`, `move` (by file id) and `folder_create`,
+  `folder_rename`, `folder_move`, `folder_delete` (by path). Files and folders
+  carry `meta_updated_at`; an event is applied only if newer (last writer
+  wins, by wall clock, so keep server clocks sane). A server ignores events
+  whose `by` starts with its own name, which is why server names must be
+  unique within a workspace. `folder_delete` is applied only once the folder
+  is empty, since its files arrive as their own delete events.
 * **Catch-up.** `workspace.last_message_id` records the highest processed
   message id. On startup and every five minutes the server probes the current
   top id and fetches everything in between, in batches of 100, applying

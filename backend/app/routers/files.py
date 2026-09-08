@@ -53,6 +53,20 @@ def _scope(query, model, user: User, shared: bool):
     return query if shared else query.where(model.owner_id == user.id)
 
 
+async def _emit(db: AsyncSession, user: User, kind: str, **fields):
+    """In a shared workspace, tell the other servers. Returns the event
+    timestamp (stamp it on the row so our own echo is ignored) or None."""
+    if not await _shared(db) or not manager.ready():
+        return None
+    from app import sync
+    return await sync.announce(manager, kind, by=await sync.label(db, user.username), **fields)
+
+
+async def _path(db: AsyncSession, folder_id: int | None) -> str | None:
+    from app import sync
+    return await sync.folder_path_of(db, folder_id)
+
+
 # ----------------------------------------------------------------- listing
 @router.get("/files")
 async def list_files(folder_id: int | None = None, q: str | None = None,
@@ -100,6 +114,8 @@ async def create_folder(data: FolderCreate, db: AsyncSession = Depends(get_db),
         raise HTTPException(409, "A folder with that name already exists here")
     folder = Folder(owner_id=user.id, parent_id=data.parent_id, name=data.name)
     db.add(folder)
+    await db.flush()
+    await _emit(db, user, "folder_create", path=await _path(db, folder.id))
     await db.commit()
     return folder_out(folder)
 
@@ -152,14 +168,18 @@ async def bulk_move(data: BulkMove, db: AsyncSession = Depends(get_db), user: Us
     """Move files and/or folders into target_folder_id (null = top level).
     Only the index changes; nothing moves in the channel."""
     await _own_folder(db, user, data.target_folder_id)
+    target_path = await _path(db, data.target_folder_id)
     moved = 0
     for fid in dict.fromkeys(data.folder_ids):
         folder = await _own_folder(db, user, fid)
+        old_path = await _path(db, folder.id)
         await _move_folder(db, user, folder, data.target_folder_id)
+        folder.meta_updated_at = (await _emit(db, user, "folder_move", path=old_path, to=target_path)) or datetime.utcnow()
         moved += 1
     for file_id in dict.fromkeys(data.file_ids):
         f = await _own_file(db, user, file_id)
         f.folder_id = data.target_folder_id
+        f.meta_updated_at = (await _emit(db, user, "move", id=f.id, path=target_path)) or datetime.utcnow()
         moved += 1
     await db.commit()
     return {"ok": True, "moved": moved}
@@ -170,7 +190,9 @@ async def move_folder(folder_id: int, data: Move, db: AsyncSession = Depends(get
                       user: User = Depends(security.current_user)):
     folder = await _own_folder(db, user, folder_id)
     await _own_folder(db, user, data.folder_id)
+    old_path = await _path(db, folder.id)
     await _move_folder(db, user, folder, data.folder_id)
+    folder.meta_updated_at = (await _emit(db, user, "folder_move", path=old_path, to=await _path(db, data.folder_id))) or datetime.utcnow()
     await db.commit()
     return folder_out(folder)
 
@@ -213,7 +235,9 @@ async def ensure_folder_path(data: FolderEnsure, db: AsyncSession = Depends(get_
 async def rename_folder(folder_id: int, data: Rename, db: AsyncSession = Depends(get_db),
                         user: User = Depends(security.current_user)):
     folder = await _own_folder(db, user, folder_id)
+    old_path = await _path(db, folder.id)
     folder.name = FolderCreate(name=data.name).name
+    folder.meta_updated_at = (await _emit(db, user, "folder_rename", path=old_path, name=folder.name)) or datetime.utcnow()
     await db.commit()
     return folder_out(folder)
 
@@ -233,6 +257,7 @@ async def _collect_files(db: AsyncSession, folder: Folder) -> list[File]:
 async def delete_folder(folder_id: int, db: AsyncSession = Depends(get_db),
                         user: User = Depends(security.current_user)):
     folder = await _own_folder(db, user, folder_id)
+    folder_path_before = await _path(db, folder.id)
     files = await _collect_files(db, folder)
     for f in files:
         await _takedown(f)
@@ -245,6 +270,7 @@ async def delete_folder(folder_id: int, db: AsyncSession = Depends(get_db),
         by = await sync.label(db, user.username)
         for fid in ids:
             await sync.announce_delete(manager, fid, by)
+        await sync.announce(manager, "folder_delete", path=folder_path_before, by=by)
     return {"ok": True, "files_deleted": len(files)}
 
 
@@ -262,6 +288,7 @@ async def rename_file(file_id: str, data: Rename, db: AsyncSession = Depends(get
     if not name or "/" in name or "\\" in name:
         raise HTTPException(400, "Invalid file name")
     f.name = name
+    f.meta_updated_at = (await _emit(db, user, "rename", id=f.id, name=name)) or datetime.utcnow()
     await db.commit()
     return file_out(f)
 
@@ -272,6 +299,7 @@ async def move_file(file_id: str, data: Move, db: AsyncSession = Depends(get_db)
     f = await _own_file(db, user, file_id)
     await _own_folder(db, user, data.folder_id)
     f.folder_id = data.folder_id
+    f.meta_updated_at = (await _emit(db, user, "move", id=f.id, path=await _path(db, data.folder_id))) or datetime.utcnow()
     await db.commit()
     return file_out(f)
 

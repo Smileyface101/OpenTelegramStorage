@@ -123,8 +123,59 @@ async def index_part(db, message_id: int, caption: dict, doc_size: int) -> bool:
     return changed
 
 
+def _ts(ev: dict) -> datetime:
+    try:
+        return datetime.fromisoformat(ev["ts"])
+    except (KeyError, ValueError):
+        return datetime.utcnow()
+
+
+def _newer(ev_ts: datetime, current: datetime | None) -> bool:
+    """Last-writer-wins: apply only if the event is newer than what we have.
+    Equal timestamps are our own echo and are skipped."""
+    return current is None or ev_ts > current
+
+
+async def folder_path_of(db, folder_id: int | None) -> str | None:
+    names: list[str] = []
+    seen: set[int] = set()
+    while folder_id is not None and folder_id not in seen:
+        seen.add(folder_id)
+        folder = await db.get(Folder, folder_id)
+        if folder is None:
+            break
+        names.append(folder.name)
+        folder_id = folder.parent_id
+    return "/".join(reversed(names)) or None
+
+
+async def resolve_path(db, path: str | None) -> Folder | None:
+    """Folder for "A/B/C" in the (shared) tree, or None for the root / unknown."""
+    if not path:
+        return None
+    parent_id = None
+    folder = None
+    for seg in [s for s in path.split("/") if s]:
+        folder = await db.scalar(select(Folder).where(Folder.parent_id == parent_id, Folder.name == seg).order_by(Folder.id))
+        if folder is None:
+            return None
+        parent_id = folder.id
+    return folder
+
+
+async def is_own(db, ev: dict) -> bool:
+    """Our own events come back to us through the channel. Server names must
+    be unique in a workspace; the wizard says so."""
+    name = (await settings_store.get(db, "workspace.name")) or ""
+    by = str(ev.get("by") or "")
+    return bool(name) and by.startswith(name + "/")
+
+
 async def apply_event(db, ev: dict) -> bool:
+    if await is_own(db, ev):
+        return False
     kind = ev.get("t")
+    ts = _ts(ev)
     if kind == "delete":
         f = await db.get(File, str(ev.get("id")), options=[selectinload(File.parts)])
         if f is None:
@@ -133,6 +184,54 @@ async def apply_event(db, ev: dict) -> bool:
         remove_part_files(f.parts)
         await db.delete(f)
         logger.info("sync: file %s deleted by %s", ev.get("id"), ev.get("by"))
+        return True
+    if kind in ("rename", "move"):
+        f = await db.get(File, str(ev.get("id")))
+        if f is None or not _newer(ts, f.meta_updated_at):
+            return False
+        if kind == "rename":
+            name = str(ev.get("name") or "").strip()
+            if not name:
+                return False
+            f.name = name[:255]
+        else:
+            owner = await _owner_id(db)
+            f.folder_id = await _ensure_path(db, owner, ev.get("path")) if ev.get("path") else None
+        f.meta_updated_at = ts
+        return True
+    if kind == "folder_create":
+        owner = await _owner_id(db)
+        if owner is None:
+            return False
+        await _ensure_path(db, owner, ev.get("path"))
+        return True
+    if kind in ("folder_rename", "folder_move", "folder_delete"):
+        folder = await resolve_path(db, ev.get("path"))
+        if folder is None:
+            return False
+        if kind == "folder_delete":
+            has_files = await db.scalar(select(File.id).where(File.folder_id == folder.id).limit(1))
+            if has_files:
+                return False  # deletes of its files arrive as their own events; keep until empty
+            await db.delete(folder)
+            return True
+        if not _newer(ts, folder.meta_updated_at):
+            return False
+        if kind == "folder_rename":
+            name = str(ev.get("name") or "").strip()
+            if not name or "/" in name:
+                return False
+            folder.name = name[:255]
+        else:
+            target = await resolve_path(db, ev.get("to")) if ev.get("to") else None
+            if ev.get("to") and target is None:
+                owner = await _owner_id(db)
+                tid = await _ensure_path(db, owner, ev.get("to"))
+                target = await db.get(Folder, tid)
+            if target is not None and (target.id == folder.id):
+                return False
+            folder.parent_id = target.id if target else None
+        folder.meta_updated_at = ts
         return True
     return False
 
@@ -217,12 +316,19 @@ async def reconcile(manager) -> dict:
     return summary
 
 
-async def announce_delete(manager, file_id: str, by: str | None) -> None:
-    """Tell other servers a file was deleted (best effort)."""
+async def announce(manager, kind: str, **fields) -> datetime | None:
+    """Post an event for the other servers (best effort). Returns the event
+    timestamp so the caller can stamp its local row (echo is then skipped)."""
+    text = make_event(kind, **fields)
     try:
-        await manager.send_text(make_event("delete", id=file_id, by=by))
+        await manager.send_text(text)
     except Exception as e:  # noqa: BLE001
-        logger.warning("sync: could not post delete event for %s: %s", file_id, e)
+        logger.warning("sync: could not post %s event: %s", kind, e)
+    return datetime.fromisoformat(json.loads(text)["ts"])
+
+
+async def announce_delete(manager, file_id: str, by: str | None) -> None:
+    await announce(manager, "delete", id=file_id, by=by)
 
 
 async def label(db, username: str) -> str:

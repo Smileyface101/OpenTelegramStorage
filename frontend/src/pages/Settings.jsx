@@ -451,10 +451,10 @@ function WorkspaceSection() {
         </label>
         <label className={`block rounded-lg border p-3 cursor-pointer ${shared ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
           <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={shared} onChange={() => setS({ ...s, workspace_mode: 'shared' })} /> Shared: other servers or people use this channel too</div>
-          <p className="text-xs text-ink-400 mt-1">The channel is a shared drive. Files posted by other servers are indexed here as they arrive (or on the next catch-up after downtime), their deletions are applied, and all users on this server see everything. Renames and moves are still local to each server for now.</p>
+          <p className="text-xs text-ink-400 mt-1">The channel is a shared drive. Files posted by other servers are indexed here as they arrive (or on the next catch-up after downtime), their deletions, renames and moves are applied, and all users on this server see everything.</p>
         </label>
         <div><label className="label">This server's name</label><input className="input" placeholder="e.g. home" value={s.workspace_name || ''} onChange={(e) => setS({ ...s, workspace_name: e.target.value })} />
-          <p className="text-xs text-ink-400 mt-1">Shown as "name/username" next to files uploaded from here.</p></div>
+          <p className="text-xs text-ink-400 mt-1">Shown as "name/username" next to files uploaded from here. Must be different on every server that shares the channel.</p></div>
         <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
         <div className="flex gap-2"><button className="btn-primary">Save</button>{shared && <button type="button" className="btn-ghost" disabled={busy} onClick={syncNow}>{busy ? 'Syncing…' : 'Sync with channel now'}</button>}</div>
       </form>
