@@ -1,7 +1,9 @@
 services:
   app:
+    # Prebuilt image from GitHub Container Registry. `docker compose up --build`
+    # builds from this checkout instead.
+    image: ghcr.io/smileyface101/opentelegramstorage:latest
     build: .
-    image: opentelegramstorage:latest
     restart: unless-stopped
     ports:
       - "${OTS_PORT:-8080}:8000"
