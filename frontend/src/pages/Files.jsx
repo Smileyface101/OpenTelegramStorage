@@ -452,10 +452,11 @@ export default function Files({ user }) {
                                   <div className="absolute inset-y-0 left-0 bg-brand-500/30" style={{ width: `${pct(received, f.size)}%` }} />
                                   <div className="absolute inset-y-0 left-0 bg-brand-500" style={{ width: `${pct(f.bytes_done, f.size)}%` }} />
                                 </div>
-                                <div className="text-[11px] text-ink-400 mt-0.5 flex items-center gap-2">
-                                  <span>{f.status === 'receiving' || up ? `${bytes(received)} from browser · ` : ''}{bytes(f.bytes_done)} in Telegram{f.parts_total > 1 ? ` · part ${Math.min(f.parts_uploaded + 1, f.parts_total)}/${f.parts_total}` : ''}</span>
-                                  {up?.status === 'waiting' && <span className="text-amber-300">browser paused while Telegram catches up</span>}
-                                  {up && <button onClick={() => up.ctrl.abort()} className="text-red-300 hover:text-red-200">cancel upload</button>}
+                                <div className="text-[11px] text-ink-400 mt-0.5 flex items-center gap-2 whitespace-nowrap">
+                                  <span className="truncate" title={up?.status === 'waiting' ? 'Browser paused while Telegram catches up' : undefined}>
+                                    {f.status === 'receiving' || up ? `${bytes(received)} sent · ` : ''}{bytes(f.bytes_done)} in Telegram{f.parts_total > 1 ? ` · part ${Math.min(f.parts_uploaded + 1, f.parts_total)}/${f.parts_total}` : ''}{up?.status === 'waiting' ? ' · waiting for Telegram' : ''}
+                                  </span>
+                                  {up && <button onClick={() => up.ctrl.abort()} className="shrink-0 rounded px-1 text-red-300 hover:bg-ink-700 hover:text-red-200" title="Cancel this upload">✕</button>}
                                 </div>
                               </div>
                             )
