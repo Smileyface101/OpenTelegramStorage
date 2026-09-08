@@ -36,7 +36,9 @@ _hello_pending: list = []   # set by apply_event("hello"); drained by the worker
 revision = 0
 status = {"last_live_at": None, "last_live_kind": None, "last_catchup_at": None, "last_catchup": None,
           "last_reconcile_at": None, "events_applied": 0, "parts_indexed": 0, "last_error": None, "server_id": None,
-          "top_seen": 0}
+          "top_seen": 0,
+          # What sync is doing right now, for the UI: idle | catching_up | handshake
+          "phase": "idle", "progress": None}
 
 
 def note_message_id(message_id: int) -> None:
@@ -361,6 +363,8 @@ async def catch_up(manager) -> dict:
         last = await settings_store.get_int(db, "workspace.last_message_id", 0)
     start = last + 1
     highest_found = last
+    status["phase"] = "catching_up"
+    status["progress"] = summary
     # How many empty batches past the highest known id end the scan. When we
     # know the top from live traffic or a peer, one is enough. A fresh server
     # knows nothing yet, and a channel that lost its early messages (deletes,
@@ -391,6 +395,8 @@ async def catch_up(manager) -> dict:
                 await settings_store.set(db, "workspace.last_message_id", str(highest_found))
                 await db.commit()
             note_message_id(highest_found)
+            if summary["parts"] or summary["events"]:
+                bump()
         elif start > status["top_seen"]:
             empty_run += 1
             if empty_run >= empty_limit:
@@ -400,6 +406,8 @@ async def catch_up(manager) -> dict:
             break  # safety valve
     status["last_catchup_at"] = datetime.utcnow().isoformat()
     status["last_catchup"] = summary
+    status["phase"] = "idle"
+    status["progress"] = None
     if summary["parts"] or summary["events"]:
         logger.info("sync catch-up: %s", summary)
         bump()
@@ -555,8 +563,12 @@ async def startup_handshake(manager) -> None:
         name = (await settings_store.get(db, "workspace.name")) or "server"
     try:
         await catch_up(manager)
+        status["phase"] = "handshake"
         await say_hello(manager, f"{name}/system")
         await publish_layout(manager, f"{name}/system")
     except Exception as e:  # noqa: BLE001
         status["last_error"] = f"startup handshake: {e}"[:300]
         logger.warning("sync: startup handshake failed: %s", e)
+    finally:
+        status["phase"] = "idle"
+        status["progress"] = None

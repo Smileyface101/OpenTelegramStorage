@@ -116,7 +116,7 @@ class TransferWorker:
         loop = asyncio.get_event_loop()
         next_reconnect = loop.time() + RECONNECT_INTERVAL
         next_cleanup = loop.time() + 60.0
-        next_catchup = loop.time() + 15.0
+        next_catchup = loop.time() + 3.0
         next_reconcile = loop.time() + SYNC_RECONCILE_INTERVAL
         handshake_done = False
         while not self._stop.is_set():

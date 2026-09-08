@@ -74,10 +74,20 @@ async def _path(db: AsyncSession, folder_id: int | None) -> str | None:
 
 # ----------------------------------------------------------------- listing
 @router.get("/files/revision")
-async def files_revision(user: User = Depends(security.current_user)):
-    """Cheap change counter; the UI polls it and reloads the listing when it moves."""
-    from app import sync
-    return {"revision": sync.revision}
+async def files_revision(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
+    """Cheap change counter; the UI polls it and reloads the listing when it
+    moves. Also carries the live sync state so the page can say what is
+    happening while files from the channel are still arriving."""
+    from app import settings_store, sync
+    shared = await settings_store.shared_mode(db)
+    st = sync.status
+    return {
+        "revision": sync.revision,
+        "sync": {
+            "shared": shared, "phase": st["phase"] if shared else "idle", "progress": st["progress"],
+            "last_catchup_at": st["last_catchup_at"], "connected": manager.ready(),
+        } if shared else None,
+    }
 
 
 @router.get("/files")

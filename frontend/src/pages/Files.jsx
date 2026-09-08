@@ -66,19 +66,22 @@ export default function Files({ user }) {
   // Live refresh: the server bumps a revision counter on every index change,
   // including changes synced from other servers; reload the listing when it moves.
   const revRef = useRef(null)
+  const [syncState, setSyncState] = useState(null)
   useEffect(() => {
     let alive = true
     const tick = async () => {
       try {
-        const { revision } = await get('/api/files/revision')
+        const { revision, sync } = await get('/api/files/revision')
         if (!alive) return
+        setSyncState(sync)
         if (revRef.current !== null && revision !== revRef.current) load()
         revRef.current = revision
       } catch { /* offline; try again next tick */ }
     }
-    tick(); const t = setInterval(tick, 3000)
+    tick(); const t = setInterval(tick, syncState?.phase && syncState.phase !== 'idle' ? 1500 : 3000)
     return () => { alive = false; clearInterval(t) }
-  }, [load])
+  }, [load, syncState?.phase])
+  const syncing = syncState?.shared && (syncState.phase !== 'idle' || (!syncState.last_catchup_at && syncState.connected))
   const pending = data?.files.some((f) => f.status !== 'ready' && f.status !== 'failed')  // includes 'syncing' from other servers
   useEffect(() => { if (!pending) return; const t = setInterval(load, 2000); return () => clearInterval(t) }, [pending, load])
   useEffect(() => { try { localStorage.setItem('ots.sort', JSON.stringify(sort)) } catch { /* ignore */ } }, [sort])
@@ -356,6 +359,16 @@ export default function Files({ user }) {
             <input ref={resumeInput} type="file" hidden onChange={onPickResume} />
           </div>
 
+          {syncing && (
+            <div className="flex items-center gap-3 rounded-xl bg-violet-500/10 border border-violet-500/30 px-3 py-2 text-sm text-violet-200">
+              <span className="w-4 h-4 border-2 border-violet-300 border-t-transparent rounded-full animate-spin shrink-0" />
+              <span>
+                {syncState.phase === 'handshake' ? 'Exchanging folder layout with the other servers…'
+                  : syncState.phase === 'catching_up' && syncState.progress ? `Syncing with the channel… scanned ${syncState.progress.scanned} messages, found ${syncState.progress.parts} file part${syncState.progress.parts === 1 ? '' : 's'} so far`
+                  : 'Connecting to the shared channel… files and folders from other servers will appear here shortly'}
+              </span>
+            </div>
+          )}
           {pendingUploads.length > 0 && (
             <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm space-y-1">
               <div className="font-medium text-amber-200">{pendingUploads.length} interrupted upload{pendingUploads.length === 1 ? '' : 's'}</div>
@@ -480,8 +493,8 @@ export default function Files({ user }) {
                     {data.folders.length === 0 && data.files.length === 0 && (
                       <tr><td colSpan={6} className="p-12 text-center text-ink-400">
                         <div className="mx-auto w-14 h-14 rounded-2xl bg-ink-800 grid place-items-center mb-3"><Upload size={22} className="text-ink-300" /></div>
-                        <div className="text-ink-300 font-medium mb-1">{q ? 'No matches' : 'This folder is empty'}</div>
-                        <div className="text-xs">Drop files or folders here, or onto a folder to upload into it. Large files are split into parts automatically.</div>
+                        <div className="text-ink-300 font-medium mb-1">{q ? 'No matches' : syncing ? 'Syncing with the shared channel…' : 'This folder is empty'}</div>
+                        <div className="text-xs">{syncing ? 'Files stored by other servers appear here as the scan finds them.' : 'Drop files or folders here, or onto a folder to upload into it. Large files are split into parts automatically.'}</div>
                       </td></tr>
                     )}
                   </tbody>

@@ -319,3 +319,17 @@ async def test_fresh_server_catches_up_past_a_deleted_start(api, admin, fake_man
     tree = _foreign("tree", folders=[], top=3001); m = await fake_manager.send_text(tree); await sync.handle_post(m, tree, None)
     res = await sync.catch_up(fake_manager)
     assert res["parts"] == 1 and (await api.get(f"/api/files/{fid2}")).status_code == 200
+
+
+async def test_revision_endpoint_reports_sync_phase(api, admin, fake_manager):
+    r = (await api.get("/api/files/revision")).json()
+    assert r["sync"] is None  # private mode: nothing to report
+    await api.put("/api/admin/settings", json={"workspace_mode": "shared", "workspace_name": "home"})
+    r = (await api.get("/api/files/revision")).json()
+    assert r["sync"]["shared"] is True and r["sync"]["phase"] == "idle"
+    sync.status["phase"] = "catching_up"; sync.status["progress"] = {"scanned": 300, "parts": 2, "events": 0}
+    r = (await api.get("/api/files/revision")).json()
+    assert r["sync"]["phase"] == "catching_up" and r["sync"]["progress"]["scanned"] == 300
+    sync.status["phase"] = "idle"; sync.status["progress"] = None
+    await sync.catch_up(fake_manager)
+    assert sync.status["phase"] == "idle" and (await api.get("/api/files/revision")).json()["sync"]["last_catchup_at"]
