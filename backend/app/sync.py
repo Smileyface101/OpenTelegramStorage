@@ -254,7 +254,10 @@ async def apply_event(db, ev: dict) -> bool:
         await _ensure_path(db, owner, ev.get("path"))
         return True
     if kind == "tree":
-        # Full folder list from another server (published layout).
+        # Full folder list from another server (published layout). It also
+        # tells us how far the channel goes, so our next catch-up reads all of it.
+        if isinstance(ev.get("top"), int):
+            note_message_id(ev["top"])
         owner = await _owner_id(db)
         if owner is None:
             return False
@@ -334,7 +337,9 @@ async def handle_post(message_id: int, text: str, doc_size: int | None) -> None:
                 status["events_applied"] += 1 if changed else 0
                 status["last_live_kind"] = ev.get("t")
             status["last_live_at"] = datetime.utcnow().isoformat()
-            await _bump_last_seen(db, message_id)
+            # Note: live posts do NOT advance workspace.last_message_id. That
+            # marker means "scanned contiguously up to here" and only catch-up
+            # moves it, so a message missed live is never skipped.
             await db.commit()
             if changed:
                 bump()
@@ -356,11 +361,18 @@ async def catch_up(manager) -> dict:
         last = await settings_store.get_int(db, "workspace.last_message_id", 0)
     start = last + 1
     highest_found = last
+    # How many empty batches past the highest known id end the scan. When we
+    # know the top from live traffic or a peer, one is enough. A fresh server
+    # knows nothing yet, and a channel that lost its early messages (deletes,
+    # auto-delete) starts with a long empty stretch, so look much further.
+    empty_limit = 1 if status["top_seen"] > 0 else 20
+    empty_run = 0
     while True:
         ids = list(range(start, start + BATCH))
         msgs = await manager.fetch_messages(ids, include_text=True)
         summary["scanned"] += len(ids)
         if msgs:
+            empty_run = 0
             async with _db.async_session() as db:
                 for m in msgs:
                     highest_found = max(highest_found, m["id"])
@@ -380,9 +392,11 @@ async def catch_up(manager) -> dict:
                 await db.commit()
             note_message_id(highest_found)
         elif start > status["top_seen"]:
-            break  # nothing here and nothing known beyond: end of channel
+            empty_run += 1
+            if empty_run >= empty_limit:
+                break  # nothing here and nothing known beyond: end of channel
         start += BATCH
-        if summary["scanned"] > 20000:
+        if summary["scanned"] > 50000:
             break  # safety valve
     status["last_catchup_at"] = datetime.utcnow().isoformat()
     status["last_catchup"] = summary
@@ -488,12 +502,12 @@ async def layout_events(db, by: str | None) -> list[str]:
     paths.sort(key=lambda p: (p.count("/"), p))
     events: list[str] = []
     batch: list[str] = []
+    top = max(status["top_seen"], await settings_store.get_int(db, "workspace.last_message_id", 0))
     for path in paths:
         batch.append(path)
         if len(json.dumps(batch)) > EVENT_MAX_CHARS - 200:
-            events.append(make_event("tree", folders=batch[:-1], by=by)); batch = [path]
-    if batch:
-        events.append(make_event("tree", folders=batch, by=by))
+            events.append(make_event("tree", folders=batch[:-1], by=by, top=top)); batch = [path]
+    events.append(make_event("tree", folders=batch, by=by, top=top))  # always at least one, even if empty
     files = (await db.execute(select(File.id, File.name, File.folder_id).where(File.status == FileStatus.READY))).all()
     folder_paths: dict = {}
     for f in folders:

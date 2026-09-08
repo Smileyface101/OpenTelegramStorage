@@ -302,3 +302,20 @@ async def test_reconcile_refuses_mass_removal(api, admin, fake_manager):
     for fid in fids:
         assert (await api.get(f"/api/files/{fid}")).status_code == 200
     fake_manager.messages.update(saved)
+
+
+async def test_fresh_server_catches_up_past_a_deleted_start(api, admin, fake_manager):
+    """A new server knows nothing; the channel's first 300 ids were deleted.
+    Catch-up must still find the files further on."""
+    await api.put("/api/admin/settings", json={"workspace_mode": "shared", "workspace_name": "new"})
+    fake_manager._next = 350  # ids 1..349 never existed / were deleted
+    fid, _ = _other_server_uploads(fake_manager, "old.bin", b"o" * 2000, 1000)
+    res = await sync.catch_up(fake_manager)
+    assert res["parts"] == 2
+    assert (await api.get(f"/api/files/{fid}")).json()["status"] == "ready"
+    # A peer's tree event carries its top id; we scan up to it even after a gap.
+    fake_manager._next = 3000
+    fid2, _ = _other_server_uploads(fake_manager, "far.bin", b"f" * 500, 1000)
+    tree = _foreign("tree", folders=[], top=3001); m = await fake_manager.send_text(tree); await sync.handle_post(m, tree, None)
+    res = await sync.catch_up(fake_manager)
+    assert res["parts"] == 1 and (await api.get(f"/api/files/{fid2}")).status_code == 200

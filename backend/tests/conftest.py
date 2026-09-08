@@ -48,6 +48,7 @@ async def _clean_tables():
     from app import sync as _sync
     _sync._hello_pending.clear(); _sync._last_hello_reply = 0.0
     _sync.status["server_id"] = None; _sync.status["last_error"] = None; _sync._missing_seen.clear()
+    _sync.status["top_seen"] = 0
     for leftover in config.STAGING_DIR.glob("*"):
         leftover.unlink()
     yield
