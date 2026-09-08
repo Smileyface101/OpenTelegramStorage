@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { get, post } from '../lib/api'
+import { get, post, put } from '../lib/api'
 import { Alert } from '../components/ui'
 
 function Guide({ title, children, open = true }) {
@@ -22,7 +22,7 @@ function Field({ label, hint, ...props }) {
 }
 
 export default function Setup({ setup, user, onDone, onAdminCreated }) {
-  const [step, setStep] = useState(setup.needs_admin ? 1 : (!setup.telegram_connected ? 2 : 3))
+  const [step, setStep] = useState(setup.needs_admin ? 1 : (!setup.telegram_connected ? 2 : (!setup.channel_configured ? 3 : 4)))
   if (!setup.needs_admin && user?.role !== 'admin') {
     return <div className="min-h-screen grid place-items-center text-sm text-ink-400">Only an admin can run setup.</div>
   }
@@ -30,14 +30,15 @@ export default function Setup({ setup, user, onDone, onAdminCreated }) {
     <div className="min-h-screen flex items-center justify-center p-4">
       <div className="w-full max-w-lg space-y-4">
         <h1 className="text-xl font-semibold">Set up OpenTelegramStorage</h1>
-        <ol className="flex gap-2 text-xs text-ink-400">
-          {['Admin account', 'Connect bot', 'Pick channel'].map((l, i) => (
+        <ol className="flex flex-wrap gap-2 text-xs text-ink-400">
+          {['Admin account', 'Connect bot', 'Pick channel', 'Sharing'].map((l, i) => (
             <li key={l} className={`rounded-full px-3 py-1 ${step === i + 1 ? 'bg-brand-500 text-white' : 'bg-ink-800'}`}>{i + 1}. {l}</li>
           ))}
         </ol>
         {step === 1 && <AdminStep onNext={async () => { await onAdminCreated(); setStep(2) }} />}
         {step === 2 && <BotStep onNext={() => setStep(3)} onSkip={onDone} />}
-        {step === 3 && <ChannelStep onDone={onDone} onBack={() => setStep(2)} />}
+        {step === 3 && <ChannelStep onDone={() => setStep(4)} onBack={() => setStep(2)} />}
+        {step === 4 && <SharingStep onDone={onDone} onBack={() => setStep(3)} />}
       </div>
     </div>
   )
@@ -162,5 +163,43 @@ export function ChannelStep({ onDone, onBack }) {
         {status?.channel && <button className="btn-primary" onClick={onDone}>Continue</button>}
       </div>
     </div>
+  )
+}
+
+
+export function SharingStep({ onDone, onBack }) {
+  const [mode, setMode] = useState('private')
+  const [name, setName] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async (e) => {
+    e.preventDefault(); setError(''); setBusy(true)
+    try { await put('/api/admin/settings', { workspace_mode: mode, workspace_name: mode === 'shared' ? (name.trim() || 'server') : name.trim() }); onDone() }
+    catch (err) { setError(err.message) } finally { setBusy(false) }
+  }
+  return (
+    <form onSubmit={submit} className="card space-y-3">
+      <p className="text-sm text-ink-300">Will other people or other servers use this same bot and channel?</p>
+      <label className={`block rounded-lg border p-3 cursor-pointer ${mode === 'private' ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
+        <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={mode === 'private'} onChange={() => setMode('private')} /> No, just this server</div>
+        <p className="text-xs text-ink-400 mt-1">The channel belongs to this installation. Each user you add here gets a private folder tree that other users cannot see.</p>
+      </label>
+      <label className={`block rounded-lg border p-3 cursor-pointer ${mode === 'shared' ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
+        <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={mode === 'shared'} onChange={() => setMode('shared')} /> Yes, share it with other servers or people</div>
+        <p className="text-xs text-ink-400 mt-1">The channel becomes a shared drive. Files uploaded from any server connected to it appear here within seconds, deletions propagate, and every user on this server sees everything. Anyone who holds the bot token can read the channel anyway, so this is the honest model for a shared setup.</p>
+        {mode === 'shared' && (
+          <div className="mt-2">
+            <label className="label">Name of this server (shown next to files it uploads)</label>
+            <input className="input" placeholder="e.g. home, laptop, office" value={name} onChange={(e) => setName(e.target.value)} />
+            <p className="text-xs text-ink-400 mt-1">To connect a second server: install it, paste the same API id, hash and bot token, pick the same channel, choose "Yes" here, and import the content key from Settings → Content encryption if encryption is on.</p>
+          </div>
+        )}
+      </label>
+      <Alert>{error}</Alert>
+      <div className="flex gap-2">
+        {onBack && <button type="button" className="btn-ghost" onClick={onBack}>Back</button>}
+        <button className="btn-primary" disabled={busy}>Finish</button>
+      </div>
+    </form>
   )
 }

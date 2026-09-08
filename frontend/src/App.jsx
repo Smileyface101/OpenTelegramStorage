@@ -37,7 +37,7 @@ export default function App() {
 
   const onAuth = async () => {
     const st = await refresh()
-    const needsWizard = st.user?.role === 'admin' && !st.setup.channel_configured
+    const needsWizard = st.user?.role === 'admin' && (!st.setup.channel_configured || !st.setup.workspace_mode)
     navigate(needsWizard ? '/setup' : '/files', { replace: true })
   }
   const onLogout = async () => { await refresh(); navigate('/login', { replace: true }) }

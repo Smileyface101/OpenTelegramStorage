@@ -36,7 +36,7 @@ export function Progress({ value, className = '' }) {
 
 export function StatusBadge({ status }) {
   const map = {
-    ready: 'bg-emerald-500/15 text-emerald-300', queued: 'bg-ink-700 text-ink-300', receiving: 'bg-amber-500/15 text-amber-300',
+    ready: 'bg-emerald-500/15 text-emerald-300', queued: 'bg-ink-700 text-ink-300', receiving: 'bg-amber-500/15 text-amber-300', syncing: 'bg-violet-500/15 text-violet-300',
     hashing: 'bg-sky-500/15 text-sky-300', uploading: 'bg-brand-500/15 text-brand-400', failed: 'bg-red-500/15 text-red-300',
   }
   return <span className={`rounded px-2 py-0.5 text-xs font-medium ${map[status] || map.queued}`}>{status}</span>

@@ -16,6 +16,7 @@ class SetupStatus(BaseModel):
     telegram_configured: bool
     telegram_connected: bool
     channel_configured: bool
+    workspace_mode: str | None = None
     version: str
 
 
@@ -106,6 +107,8 @@ class SettingsUpdate(BaseModel):
     stale_upload_hours: int | None = Field(default=None, ge=0, le=24 * 365)
     public_url: str | None = Field(default=None, max_length=300)
     encrypt_new: bool | None = None
+    workspace_mode: str | None = Field(default=None, pattern=r"^(private|shared)$")
+    workspace_name: str | None = Field(default=None, max_length=60)
 
 
 class UploadComplete(BaseModel):

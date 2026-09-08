@@ -11,6 +11,7 @@ export default function Settings({ user, onChange }) {
     <div className="space-y-6 max-w-2xl">
       {isAdmin && <SystemSection onChange={onChange} />}
       {isAdmin && <TelegramSection onChange={onChange} />}
+      {isAdmin && <WorkspaceSection />}
       {isAdmin && <TransferSection />}
       {isAdmin && <EncryptionSection />}
       {isAdmin && <RecoverySection />}
@@ -426,6 +427,37 @@ function EncryptionSection() {
         </form>
       )}
       <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
+    </Section>
+  )
+}
+
+function WorkspaceSection() {
+  const [s, setS] = useState(null)
+  const [msg, setMsg] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  useEffect(() => { get('/api/admin/settings').then(setS) }, [])
+  const save = async (e) => {
+    e.preventDefault(); setMsg(''); setError('')
+    try { setS(await put('/api/admin/settings', { workspace_mode: s.workspace_mode, workspace_name: s.workspace_name })); setMsg('Saved') } catch (err) { setError(err.message) }
+  }
+  const syncNow = async () => { setBusy(true); setError(''); setMsg(''); try { const r = await post('/api/admin/sync/catch-up'); setMsg(`Scanned ${r.scanned} new message(s): ${r.parts} part(s), ${r.events} event(s); checked ${r.checked} part(s), removed ${r.removed} file(s) no longer in the channel.`) } catch (err) { setError(err.message) } finally { setBusy(false) } }
+  if (!s) return null
+  const shared = s.workspace_mode === 'shared'
+  return (
+    <Section title="Workspace">
+      <form onSubmit={save} className="space-y-3">
+        <label className={`block rounded-lg border p-3 cursor-pointer ${!shared ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
+          <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={!shared} onChange={() => setS({ ...s, workspace_mode: 'private' })} /> Private: this server owns the channel</div>
+          <p className="text-xs text-ink-400 mt-1">Users on this server have private folder trees. Posts from anything else in the channel are ignored.</p>
+        </label>
+        <label className={`block rounded-lg border p-3 cursor-pointer ${shared ? 'border-brand-500 bg-brand-500/10' : 'border-ink-700'}`}>
+          <div className="flex items-center gap-2 text-sm font-medium"><input type="radio" checked={shared} onChange={() => setS({ ...s, workspace_mode: 'shared' })} /> Shared: other servers or people use this channel too</div>
+          <p className="text-xs text-ink-400 mt-1">The channel is a shared drive. Files posted by other servers are indexed here as they arrive (or on the next catch-up after downtime), their deletions are applied, and all users on this server see everything. Renames and moves are still local to each server for now.</p>
+        </label>
+        <div><label className="label">This server's name</label><input className="input" placeholder="e.g. home" value={s.workspace_name || ''} onChange={(e) => setS({ ...s, workspace_name: e.target.value })} />
+          <p className="text-xs text-ink-400 mt-1">Shown as "name/username" next to files uploaded from here.</p></div>
+        <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
+        <div className="flex gap-2"><button className="btn-primary">Save</button>{shared && <button type="button" className="btn-ghost" disabled={busy} onClick={syncNow}>{busy ? 'Syncing…' : 'Sync with channel now'}</button>}</div>
+      </form>
     </Section>
   )
 }

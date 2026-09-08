@@ -27,20 +27,30 @@ logger = logging.getLogger(__name__)
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
+async def _shared(db: AsyncSession) -> bool:
+    from app import settings_store
+    return await settings_store.shared_mode(db)
+
+
 async def _own_folder(db: AsyncSession, user: User, folder_id: int | None) -> Folder | None:
+    """In a shared workspace every user of this server sees every folder."""
     if folder_id is None:
         return None
     folder = await db.get(Folder, folder_id)
-    if folder is None or folder.owner_id != user.id:
+    if folder is None or (folder.owner_id != user.id and not await _shared(db)):
         raise HTTPException(404, "Folder not found")
     return folder
 
 
 async def _own_file(db: AsyncSession, user: User, file_id: str) -> File:
     f = await db.get(File, file_id, options=[selectinload(File.parts)])
-    if f is None or f.owner_id != user.id:
+    if f is None or (f.owner_id != user.id and not await _shared(db)):
         raise HTTPException(404, "File not found")
     return f
+
+
+def _scope(query, model, user: User, shared: bool):
+    return query if shared else query.where(model.owner_id == user.id)
 
 
 # ----------------------------------------------------------------- listing
@@ -48,8 +58,9 @@ async def _own_file(db: AsyncSession, user: User, file_id: str) -> File:
 async def list_files(folder_id: int | None = None, q: str | None = None,
                      db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
     folder = await _own_folder(db, user, folder_id)
-    fq = select(File).options(selectinload(File.parts)).where(File.owner_id == user.id)
-    dq = select(Folder).where(Folder.owner_id == user.id)
+    shared = await _shared(db)
+    fq = _scope(select(File).options(selectinload(File.parts)), File, user, shared)
+    dq = _scope(select(Folder), Folder, user, shared)
     if q:
         fq = fq.where(File.name.ilike(f"%{q}%"))
         dq = dq.where(Folder.name.ilike(f"%{q}%"))
@@ -70,11 +81,11 @@ async def list_files(folder_id: int | None = None, q: str | None = None,
 
 @router.get("/files/stats")
 async def stats(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
+    shared = await _shared(db)
     total, size = (await db.execute(
-        select(func.count(File.id), func.coalesce(func.sum(File.size), 0))
-        .where(File.owner_id == user.id, File.status == FileStatus.READY))).one()
-    pending = await db.scalar(select(func.count(File.id)).where(
-        File.owner_id == user.id, File.status != FileStatus.READY))
+        _scope(select(func.count(File.id), func.coalesce(func.sum(File.size), 0)), File, user, shared)
+        .where(File.status == FileStatus.READY))).one()
+    pending = await db.scalar(_scope(select(func.count(File.id)), File, user, shared).where(File.status != FileStatus.READY))
     return {"files": total or 0, "bytes": int(size or 0), "pending": pending or 0}
 
 
@@ -97,7 +108,7 @@ async def create_folder(data: FolderCreate, db: AsyncSession = Depends(get_db),
 async def folder_tree(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
     """Every folder of the user as a flat list with depth, in tree order, for
     the move picker."""
-    rows = (await db.execute(select(Folder).where(Folder.owner_id == user.id).order_by(Folder.name))).scalars().all()
+    rows = (await db.execute(_scope(select(Folder), Folder, user, await _shared(db)).order_by(Folder.name))).scalars().all()
     children: dict[int | None, list[Folder]] = {}
     for f in rows:
         children.setdefault(f.parent_id, []).append(f)
@@ -225,8 +236,15 @@ async def delete_folder(folder_id: int, db: AsyncSession = Depends(get_db),
     files = await _collect_files(db, folder)
     for f in files:
         await _takedown(f)
+    ids = [f.id for f in files]
+    shared = await _shared(db)
     await db.delete(folder)  # cascades to subfolders and file rows
     await db.commit()
+    if shared and manager.ready():
+        from app import sync
+        by = await sync.label(db, user.username)
+        for fid in ids:
+            await sync.announce_delete(manager, fid, by)
     return {"ok": True, "files_deleted": len(files)}
 
 
@@ -303,8 +321,12 @@ async def delete_file(file_id: str, db: AsyncSession = Depends(get_db), user: Us
     if f.status in (FileStatus.HASHING, FileStatus.UPLOADING):
         raise HTTPException(409, "Wait for the transfer to finish or fail before deleting")
     await _takedown(f)
+    shared = await _shared(db)
     await db.delete(f)
     await db.commit()
+    if shared and manager.ready():
+        from app import sync
+        await sync.announce_delete(manager, file_id, await sync.label(db, user.username))
     return {"ok": True}
 
 

@@ -42,6 +42,10 @@ async def update_settings(data: SettingsUpdate, db: AsyncSession = Depends(get_d
         await settings_store.set(db, "content.encrypt_new", "true" if data.encrypt_new else "false")
         if data.encrypt_new:
             await crypto.ensure_key(db)
+    if data.workspace_mode is not None:
+        await settings_store.set(db, "workspace.mode", data.workspace_mode)
+    if data.workspace_name is not None:
+        await settings_store.set(db, "workspace.name", data.workspace_name.strip()[:60])
     await db.commit()
     return await settings_store.public_settings(db)
 
@@ -227,3 +231,14 @@ async def encryption_import(data: KeyImport, db: AsyncSession = Depends(get_db),
     await crypto.set_key(db, bytes.fromhex(data.key))
     await db.commit()
     return {"key_id": crypto.key_id_of(bytes.fromhex(data.key))}
+
+
+@router.post("/sync/catch-up")
+async def sync_now(user: User = Depends(security.current_admin)):
+    """Shared workspaces: scan the channel for posts and events from other servers now."""
+    from app import sync
+    if not manager.ready():
+        raise HTTPException(503, "Telegram is not connected")
+    caught = await sync.catch_up(manager)
+    checked = await sync.reconcile(manager)
+    return {**caught, **checked}

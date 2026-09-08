@@ -77,6 +77,7 @@ class Folder(Base):
 
 
 class FileStatus(str, enum.Enum):
+    SYNCING = "syncing"       # uploaded by another server sharing this channel; parts still arriving
     RECEIVING = "receiving"   # browser still sending; completed parts already flow to Telegram
     QUEUED = "queued"         # staged locally, waiting for the worker
     HASHING = "hashing"       # worker computing part hashes
@@ -113,6 +114,8 @@ class File(Base):
     # key the parts were encrypted with.
     encrypted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     key_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # "server/username" that uploaded it (from the caption); shown in shared workspaces.
+    uploaded_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
     parts: Mapped[list["FilePart"]] = relationship(
         back_populates="file", cascade="all, delete-orphan", order_by="FilePart.index"

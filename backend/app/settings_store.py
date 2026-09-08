@@ -15,6 +15,9 @@ DEFAULTS: dict[str, str] = {
     "transfer.stale_upload_hours": "72",
     "app.public_url": "",
     "content.encrypt_new": "true",
+    "workspace.mode": "private",     # private: this server owns the channel | shared: other servers/people use it too
+    "workspace.name": "",            # how this server labels its uploads in a shared channel
+    "workspace.last_message_id": "0",
 }
 
 
@@ -72,8 +75,14 @@ async def public_settings(db: AsyncSession) -> dict:
         "stale_upload_hours": await get_int(db, "transfer.stale_upload_hours", 72),
         "public_url": (await get(db, "app.public_url")) or "",
         "encrypt_new": await get_bool(db, "content.encrypt_new", True),
+        "workspace_mode": (await get(db, "workspace.mode")) or "private",
+        "workspace_name": (await get(db, "workspace.name")) or "",
     }
 
 
 async def all_rows(db: AsyncSession) -> list[Setting]:
     return list((await db.execute(select(Setting))).scalars())
+
+
+async def shared_mode(db: AsyncSession) -> bool:
+    return ((await get(db, "workspace.mode")) or "private") == "shared"

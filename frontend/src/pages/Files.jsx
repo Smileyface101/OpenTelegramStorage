@@ -63,7 +63,7 @@ export default function Files({ user }) {
     } catch (e) { setError(e.message) }
   }, [folderId, q])
   useEffect(() => { load(); setSelected({ files: new Set(), folders: new Set() }) }, [load])
-  const pending = data?.files.some((f) => f.status !== 'ready' && f.status !== 'failed')
+  const pending = data?.files.some((f) => f.status !== 'ready' && f.status !== 'failed')  // includes 'syncing' from other servers
   useEffect(() => { if (!pending) return; const t = setInterval(load, 2000); return () => clearInterval(t) }, [pending, load])
   useEffect(() => { try { localStorage.setItem('ots.sort', JSON.stringify(sort)) } catch { /* ignore */ } }, [sort])
   useEffect(() => { if (!uploadMenu) return; const close = () => setUploadMenu(false); window.addEventListener('click', close); return () => window.removeEventListener('click', close) }, [uploadMenu])
@@ -419,6 +419,7 @@ export default function Files({ user }) {
                             <span className="truncate">{f.name}</span>
                             {f.parts_total > 1 && <span className="text-xs text-ink-400 shrink-0">{f.parts_total} parts</span>}
                             {f.encrypted && <Lock size={12} className="text-ink-500 shrink-0" title="Encrypted before it reached Telegram" />}
+                            {f.uploaded_by && <span className="text-[11px] text-ink-500 shrink-0" title="Uploaded by">{f.uploaded_by}</span>}
                             <Integrity f={f} /></div>
                           {f.integrity_error && <div className="text-xs text-red-300 mt-1 truncate">Integrity: {f.integrity_error}</div>}
                           {f.status !== 'ready' && f.status !== 'failed' && (

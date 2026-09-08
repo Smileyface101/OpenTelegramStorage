@@ -35,14 +35,27 @@ class FakeManager:
         self._next += 1
         return mid
 
-    async def fetch_messages(self, ids):
+    async def fetch_messages(self, ids, include_text=False):
         import json
         out = []
         for i in ids:
             if i in self.messages:
                 name, data, cap = self.messages[i]
+                if data is None:  # text-only message (event)
+                    if include_text:
+                        out.append({"id": i, "caption": cap, "size": None, "file_name": None})
+                    continue
                 out.append({"id": i, "caption": json.dumps(cap), "size": len(data), "file_name": name})
         return out
+
+    async def send_text(self, text):
+        mid = self._next
+        self._next += 1
+        self.messages[mid] = (None, None, text)
+        return mid
+
+    def stored_bytes(self) -> bytes:
+        return b"".join(v[1] for _k, v in sorted(self.messages.items()) if v[1] is not None)
 
     async def get_document(self, message_id):
         if message_id not in self.messages:
@@ -59,14 +72,13 @@ class FakeManager:
             self.deleted.append(i)
             self.messages.pop(i, None)
 
-    def stored_bytes(self) -> bytes:
-        return b"".join(v[1] for _k, v in sorted(self.messages.items()))
-
     def plaintext_bytes(self, key: bytes | None) -> bytes:
         """What the channel holds, decrypted where captions say so."""
         from app import crypto
         out = b""
         for _k, (_name, blob, cap) in sorted(self.messages.items()):
+            if blob is None:
+                continue
             enc = cap.get("enc")
             if enc and key is not None:
                 salt = crypto.parse_header(blob[:crypto.HEADER])

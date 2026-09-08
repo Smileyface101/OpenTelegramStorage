@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 
@@ -9,9 +10,11 @@ from tests.test_transfers import _drain, _upload
 async def _verify(api, fid):
     r = await api.post(f"/api/files/{fid}/verify")
     assert r.status_code == 200, r.text
-    for _ in range(200):
+    before = (await api.get(f"/api/files/{fid}")).json()
+    for _ in range(300):
+        await asyncio.sleep(0.01)
         f = (await api.get(f"/api/files/{fid}")).json()
-        if not f["verifying"]:
+        if not f["verifying"] and f["verified_at"] and f["verified_at"] != before.get("verified_at"):
             return f
     raise AssertionError("verification did not finish")
 

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import io
 import os
@@ -83,18 +84,20 @@ async def test_encrypted_upload_download_verify_share_rebuild(api, admin, fake_m
         assert r.status_code == 206 and r.content == data[a:b + 1], (a, b)
     # Verify passes, then catches tampering.
     await api.post(f"/api/files/{f['id']}/verify")
-    for _ in range(100):
+    for _ in range(200):
+        await asyncio.sleep(0.01)
         v = (await api.get(f"/api/files/{f['id']}")).json()
-        if not v["verifying"]:
+        if not v["verifying"] and (v["verified_at"] or v["integrity_error"]):
             break
     assert v["integrity_error"] is None and v["verified_at"]
     mid = sorted(fake_manager.messages)[1]
     name, blob, cap = fake_manager.messages[mid]
     fake_manager.messages[mid] = (name, blob[:crypto.HEADER + 5] + bytes([blob[crypto.HEADER + 5] ^ 1]) + blob[crypto.HEADER + 6:], cap)
     await api.post(f"/api/files/{f['id']}/verify")
-    for _ in range(100):
+    for _ in range(200):
+        await asyncio.sleep(0.01)
         v = (await api.get(f"/api/files/{f['id']}")).json()
-        if not v["verifying"]:
+        if not v["verifying"] and (v["verified_at"] or v["integrity_error"]):
             break
     assert "part 2" in v["integrity_error"] and "decryption failed" in v["integrity_error"]
     fake_manager.messages[mid] = (name, blob, cap)

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import __version__, security
+from app import __version__, security, settings_store
 from app.db import get_db
 from app.models import User, UserRole
 from app.routers.common import user_out
@@ -24,6 +24,7 @@ async def status(db: AsyncSession = Depends(get_db)):
         telegram_configured=st.configured,
         telegram_connected=st.connected,
         channel_configured=st.channel_id is not None,
+        workspace_mode=await settings_store.get(db, "workspace.mode"),
         version=__version__,
     )
 

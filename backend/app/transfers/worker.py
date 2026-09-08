@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app import config, crypto, settings_store
 from app import db as _db
-from app.models import File, FilePart, FileStatus, Folder
+from app.models import File, FilePart, FileStatus, Folder, User
 from app.transfers.io import RangeReader, hash_ranges, part_name, plan_parts
 from app.transfers.staging import part_path
 
@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL = 2.0
 RECONNECT_INTERVAL = 60.0
 CLEANUP_INTERVAL = 10 * 60.0
+SYNC_CATCHUP_INTERVAL = 5 * 60.0
+SYNC_RECONCILE_INTERVAL = 60 * 60.0
 
 
 class Progress:
@@ -56,7 +58,7 @@ async def folder_path(db, folder_id: int | None) -> str | None:
     return "/".join(reversed(names)) or None
 
 
-def caption_for(file: File, part: FilePart, total_parts: int, path: str | None = None) -> dict:
+def caption_for(file: File, part: FilePart, total_parts: int, path: str | None = None, by: str | None = None) -> dict:
     """Self-describing caption so the channel alone can rebuild the index."""
     cap = {
         "ots": 1,
@@ -72,7 +74,17 @@ def caption_for(file: File, part: FilePart, total_parts: int, path: str | None =
     }
     if file.encrypted:
         cap["enc"] = {"v": 1, "kid": file.key_id, "salt": part.enc_salt, "ct": part.enc_size}
+    if by:
+        cap["by"] = by
     return cap
+
+
+async def uploader_label(db, file: File) -> str | None:
+    if file.uploaded_by:
+        return file.uploaded_by
+    from app import sync
+    user = await db.get(User, file.owner_id)
+    return await sync.label(db, user.username if user else "?")
 
 
 class TransferWorker:
@@ -104,6 +116,8 @@ class TransferWorker:
         loop = asyncio.get_event_loop()
         next_reconnect = loop.time() + RECONNECT_INTERVAL
         next_cleanup = loop.time() + 60.0
+        next_catchup = loop.time() + 15.0
+        next_reconcile = loop.time() + SYNC_RECONCILE_INTERVAL
         while not self._stop.is_set():
             worked = False
             try:
@@ -120,6 +134,14 @@ class TransferWorker:
                     next_cleanup = now + CLEANUP_INTERVAL
                     from app import maintenance
                     await maintenance.cleanup(self.manager)
+                if now >= next_catchup and self.manager.ready():
+                    next_catchup = now + SYNC_CATCHUP_INTERVAL
+                    from app import sync
+                    await sync.catch_up(self.manager)
+                if now >= next_reconcile and self.manager.ready():
+                    next_reconcile = now + SYNC_RECONCILE_INTERVAL
+                    from app import sync
+                    await sync.reconcile(self.manager)
                 if self.manager.ready():
                     worked = await self.process_one()
             except Exception:  # noqa: BLE001
@@ -209,6 +231,9 @@ class TransferWorker:
         total = len(file.parts)
         name = part_name(file.name, part.index, total)
         path = await folder_path(db, file.folder_id)
+        by = await uploader_label(db, file)
+        if file.uploaded_by is None:
+            file.uploaded_by = by
         connections = await settings_store.get_int(db, "transfer.upload_connections", 4)
         if file.status == FileStatus.QUEUED:
             file.status = FileStatus.UPLOADING
@@ -221,7 +246,7 @@ class TransferWorker:
         with RangeReader(part.staging_path, 0, part.size, name=name) as raw:
             reader, size = await self._maybe_encrypt(db, file, part, raw)
             message_id = await self.manager.upload_part(
-                reader, size, name, caption_for(file, part, total, path), progress=_cb,
+                reader, size, name, caption_for(file, part, total, path, by), progress=_cb,
                 connections=max(1, min(16, connections)))
         part.message_id = message_id
         part.uploaded_at = datetime.utcnow()
@@ -325,6 +350,9 @@ class TransferWorker:
         await db.commit()
         total = len(file.parts)
         path = await folder_path(db, file.folder_id)
+        by = await uploader_label(db, file)
+        if file.uploaded_by is None:
+            file.uploaded_by = by
         connections = await settings_store.get_int(db, "transfer.upload_connections", 4)
         for part in file.parts:
             if part.message_id is not None:
@@ -338,7 +366,7 @@ class TransferWorker:
             with RangeReader(file.staging_path, part.offset, part.size, name=name) as raw:
                 reader, size = await self._maybe_encrypt(db, file, part, raw)
                 message_id = await self.manager.upload_part(
-                    reader, size, name, caption_for(file, part, total, path), progress=_cb,
+                    reader, size, name, caption_for(file, part, total, path, by), progress=_cb,
                     connections=max(1, min(16, connections)))
             part.message_id = message_id
             part.uploaded_at = datetime.utcnow()

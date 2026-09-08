@@ -175,3 +175,30 @@ needs `render_as_batch`, which `alembic/env.py` sets.
 Telegram manager (`tests/fake_telegram.py`) that stores "messages" in a dict.
 Nothing in CI talks to Telegram. The fake exercises the same code paths
 including captions, encryption, ranged downloads and rebuild.
+
+## Shared workspaces
+
+`workspace.mode = shared` turns the channel into the shared truth for several
+servers (`app/sync.py`):
+
+* **Live.** Each server's bot session receives every channel post. A post
+  with a caption for a file id the server does not know creates the file in
+  `SYNCING` state with all its parts planned; each further part fills in a
+  message id; the file becomes `READY` when all parts are present. Posts for
+  the server's own uploads are recognised by file id and ignored.
+* **Events.** Metadata changes that captions cannot express are posted as
+  small JSON messages (`{"ots-ev":1,"t":"delete","id":…,"ts":…,"by":…}`) and
+  applied by the others. Delete is implemented; rename and move are local.
+* **Catch-up.** `workspace.last_message_id` records the highest processed
+  message id. On startup and every five minutes the server probes the current
+  top id and fetches everything in between, in batches of 100, applying
+  captions and events in order.
+* **Reconcile.** Hourly, every indexed part's message is checked for
+  existence; files whose messages are gone are dropped from the index (a
+  deletion made without an event, e.g. by hand in Telegram).
+* **Visibility.** In shared mode every user of a server sees every file on
+  that server; synced files are owned by the server's first admin. Captions
+  carry `by` = `server name/username` for attribution.
+
+All servers count against the same bot's rate limits, and every server needs
+the same content key for encrypted files.

@@ -157,6 +157,11 @@ class TelegramManager:
     async def _on_channel_post(self, event) -> None:
         try:
             await self._remember_chat(await event.get_chat())
+            msg = event.message
+            if self.status.channel_id is not None and msg is not None and event.chat_id == self.status.channel_id:
+                from app import sync
+                doc_size = msg.document.size if msg.document is not None else None
+                await sync.handle_post(msg.id, msg.message or "", doc_size)
         except Exception:  # noqa: BLE001
             logger.debug("channel post handler failed", exc_info=True)
 
@@ -280,15 +285,26 @@ class TelegramManager:
         await client.delete_messages(entity, [msg.id])
         return msg.id
 
-    async def fetch_messages(self, ids: list[int]) -> list[dict]:
+    async def send_text(self, text: str) -> int:
+        client = self._require_client()
+        entity = await self._channel_entity()
+        msg = await client.send_message(entity, text, link_preview=False)
+        return msg.id
+
+    async def fetch_messages(self, ids: list[int], include_text: bool = False) -> list[dict]:
         """Return [{id, caption, size, file_name}] for messages that exist and
-        carry a document. Deleted ids are simply absent."""
+        carry a document (or, with include_text, any text message with size
+        None). Deleted ids are simply absent."""
         client = self._require_client()
         entity = await self._channel_entity()
         out: list[dict] = []
         msgs = await client.get_messages(entity, ids=ids)
         for m in msgs or []:
-            if m is None or m.document is None:
+            if m is None:
+                continue
+            if m.document is None:
+                if include_text and m.message:
+                    out.append({"id": m.id, "caption": m.message, "size": None, "file_name": None})
                 continue
             name = None
             for attr in m.document.attributes:
