@@ -55,6 +55,10 @@ browser ──chunked, resumable──▶ part staging ──worker──▶ Tel
   files are swept. Settings → System shows Telegram, worker, queue, staging
   and disk state, recent warnings, and offers reconnect and cleanup buttons.
   A configured-but-offline Telegram connection is retried every minute.
+* **Share links.** Any stored file can get public links with an optional
+  expiry, download cap and password. Downloads stream through your server,
+  so the link works wherever the server is reachable; set the public URL in
+  Settings when running behind a domain.
 * **Real delete.** Deleting a file deletes the channel messages, not just the
   index row.
 * **Self-describing channel.** Every part carries a JSON caption with the file
@@ -139,7 +143,6 @@ size); the upload is refused otherwise.
 ## Roadmap
 
 - Optional encryption of parts (AES-GCM) so Telegram never holds readable bytes.
-- Expiring share links.
 - User-account (phone) login for 4 GB parts with Telegram Premium.
 
 ## Development

@@ -13,6 +13,7 @@ export default function Settings({ user, onChange }) {
       {isAdmin && <TelegramSection onChange={onChange} />}
       {isAdmin && <TransferSection />}
       {isAdmin && <RecoverySection />}
+      <SharesSection />
       <PasswordSection />
       <TwoFactorSection />
       <SessionsSection />
@@ -60,7 +61,7 @@ function TransferSection() {
   useEffect(() => { get('/api/admin/settings').then(setS) }, [])
   const save = async (e) => {
     e.preventDefault(); setMsg(''); setError('')
-    try { setS(await put('/api/admin/settings', { part_size_mb: Number(s.part_size_mb), max_retries: Number(s.max_retries), upload_connections: Number(s.upload_connections), stale_upload_hours: Number(s.stale_upload_hours) })); setMsg('Saved') } catch (err) { setError(err.message) }
+    try { setS(await put('/api/admin/settings', { part_size_mb: Number(s.part_size_mb), max_retries: Number(s.max_retries), upload_connections: Number(s.upload_connections), stale_upload_hours: Number(s.stale_upload_hours), public_url: s.public_url ?? '' })); setMsg('Saved') } catch (err) { setError(err.message) }
   }
   if (!s) return null
   return (
@@ -76,6 +77,9 @@ function TransferSection() {
         <div><label className="label">Parallel upload connections (1–16)</label>
           <input className="input" type="number" min="1" max="16" value={s.upload_connections} onChange={(e) => setS({ ...s, upload_connections: e.target.value })} />
           <p className="text-xs text-ink-400 mt-1">Files over 10 MB are pushed to Telegram over this many connections at once. 4 is a good default; 1 uses the classic single-connection uploader.</p></div>
+        <div><label className="label">Public URL for share links (optional)</label>
+          <input className="input" placeholder="https://files.example.com" value={s.public_url || ''} onChange={(e) => setS({ ...s, public_url: e.target.value })} />
+          <p className="text-xs text-ink-400 mt-1">Used to build share links. Leave empty to use whatever address you open the app with.</p></div>
         <div><label className="label">Remove abandoned uploads after (hours, 0 = never)</label>
           <input className="input" type="number" min="0" value={s.stale_upload_hours} onChange={(e) => setS({ ...s, stale_upload_hours: e.target.value })} />
           <p className="text-xs text-ink-400 mt-1">An upload nobody resumed for this long is deleted: its staging files, its rows, and any parts that already reached the channel. Runs every 10 minutes.</p></div>
@@ -327,6 +331,39 @@ function SessionsSection() {
         ))}
       </ul>
       {list.length > 1 && <button className="btn-danger" onClick={revokeOthers}>Sign out all other devices</button>}
+      <Alert>{error}</Alert>
+    </Section>
+  )
+}
+
+function SharesSection() {
+  const [list, setList] = useState(null)
+  const [error, setError] = useState('')
+  const load = () => get('/api/shares').then(setList).catch((e) => setError(e.message))
+  useEffect(() => { load() }, [])
+  const toggle = async (s) => { try { await post(`/api/shares/${s.id}/toggle`); load() } catch (e) { setError(e.message) } }
+  const remove = async (s) => { if (!confirm('Delete this link?')) return; try { await del(`/api/shares/${s.id}`); load() } catch (e) { setError(e.message) } }
+  if (list === null) return null
+  return (
+    <Section title="Share links">
+      {list.length === 0 ? <p className="text-sm text-ink-400">No share links. Use the link icon on a file to create one.</p> : (
+        <ul className="divide-y divide-ink-800 text-sm">
+          {list.map((s) => (
+            <li key={s.id} className={`py-2 flex items-center justify-between gap-3 ${s.active ? '' : 'opacity-60'}`}>
+              <div className="min-w-0">
+                <div className="truncate">{s.file_name}{s.label ? <span className="text-ink-400"> · {s.label}</span> : ''}</div>
+                <div className="text-xs text-ink-400 truncate">{s.url}</div>
+                <div className="text-xs text-ink-500">{s.download_count} download{s.download_count === 1 ? '' : 's'}{s.max_downloads != null && ` of ${s.max_downloads}`}{s.expires_at && ` · expires ${when(s.expires_at)}`}{s.has_password && ' · password'}{s.disabled && ' · disabled'}{s.last_access_at && ` · last used ${when(s.last_access_at)}`}</div>
+              </div>
+              <span className="flex gap-2 shrink-0">
+                <button className="btn-ghost" onClick={() => navigator.clipboard?.writeText(s.url)}>Copy</button>
+                <button className="btn-ghost" onClick={() => toggle(s)}>{s.disabled ? 'Enable' : 'Disable'}</button>
+                <button className="btn-danger" onClick={() => remove(s)}>Delete</button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       <Alert>{error}</Alert>
     </Section>
   )

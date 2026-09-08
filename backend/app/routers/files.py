@@ -341,19 +341,13 @@ async def verify_file(file_id: str, db: AsyncSession = Depends(get_db), user: Us
     return {"ok": True, "verifying": True}
 
 
-@router.get("/files/{file_id}/download")
-async def download(file_id: str, request: Request, db: AsyncSession = Depends(get_db),
-                   user: User = Depends(security.current_user)):
-    f = await _own_file(db, user, file_id)
-    if f.status != FileStatus.READY:
-        raise HTTPException(409, "File is not fully in the channel yet")
-    if not manager.ready():
-        raise HTTPException(503, "Telegram is not connected")
+def stream_file(f: File, request: Request) -> StreamingResponse:
+    """Build the (Range-aware, integrity-checked) streaming response for a
+    READY file. Shared by the authenticated download and public share links."""
     parts = sorted(f.parts, key=lambda p: p.index)
     rng = _parse_range(request.headers.get("range"), f.size) if f.size else None
     start, end = rng if rng else (0, max(f.size - 1, 0))
     length = (end - start + 1) if f.size else 0
-
     file_id, file_name = f.id, f.name
 
     async def body():
@@ -366,9 +360,6 @@ async def download(file_id: str, request: Request, db: AsyncSession = Depends(ge
                 continue
             from_off = max(start, p_start) - p_start
             take = min(end, p_end) - max(start, p_start) + 1
-            # A part that streams out in full is checked against its recorded
-            # digest; a mismatch aborts the response so the client never gets
-            # a silently corrupt file.
             full = from_off == 0 and take == p.size and p.sha256
             h = hashlib.sha256() if full else None
             doc = await manager.get_document(p.message_id)
@@ -395,6 +386,17 @@ async def download(file_id: str, request: Request, db: AsyncSession = Depends(ge
         headers["Content-Range"] = f"bytes {start}-{end}/{f.size}"
     return StreamingResponse(body(), status_code=status, headers=headers,
                              media_type=f.mime_type or "application/octet-stream")
+
+
+@router.get("/files/{file_id}/download")
+async def download(file_id: str, request: Request, db: AsyncSession = Depends(get_db),
+                   user: User = Depends(security.current_user)):
+    f = await _own_file(db, user, file_id)
+    if f.status != FileStatus.READY:
+        raise HTTPException(409, "File is not fully in the channel yet")
+    if not manager.ready():
+        raise HTTPException(503, "Telegram is not connected")
+    return stream_file(f, request)
 
 
 def _quote(name: str) -> str:

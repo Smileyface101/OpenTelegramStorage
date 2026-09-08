@@ -7,6 +7,7 @@ import Login from './pages/Login'
 import Files from './pages/Files'
 import Transfers from './pages/Transfers'
 import Settings from './pages/Settings'
+import SharePage from './pages/SharePage'
 
 export default function App() {
   const [boot, setBoot] = useState({ loading: true, setup: null, user: null })
@@ -25,6 +26,9 @@ export default function App() {
 
   useEffect(() => { refresh() }, [refresh])
 
+  if (location.pathname.startsWith('/s/')) {
+    return <Routes><Route path="/s/:token" element={<SharePage />} /></Routes>
+  }
   if (boot.loading) return <Splash />
   const { setup, user } = boot
 

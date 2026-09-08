@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app import config, db as _db, settings_store
-from app.models import Bundle, File, FilePart, FileStatus, Upload, UploadStatus
+from app.models import Bundle, File, FilePart, FileStatus, Share, Upload, UploadStatus
 from app.transfers import staging
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,13 @@ async def cleanup(manager) -> dict:
                     await db.delete(f)
                     summary["stale_receiving_files"] += 1
                 await db.commit()
+
+            # Share links expired for more than 30 days.
+            old = datetime.utcnow() - timedelta(days=30)
+            for sh in (await db.execute(select(Share).where(Share.expires_at.is_not(None), Share.expires_at < old))).scalars().all():
+                await db.delete(sh)
+                summary["expired_shares"] = summary.get("expired_shares", 0) + 1
+            await db.commit()
 
             # Orphaned staging files.
             referenced = set((await db.execute(select(FilePart.staging_path).where(FilePart.staging_path.is_not(None)))).scalars())

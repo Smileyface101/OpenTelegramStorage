@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import {
   Folder, FolderOpen, FolderPlus, FolderUp, Upload, Download, Trash2, Pencil, Archive, RefreshCw, ChevronRight, ChevronDown,
-  Search, FolderInput, ArrowUp, ArrowDown, X, Home, CornerLeftUp, Image, Film, Music, FileText, FileArchive, File as FileIcon, HardDrive, ShieldCheck, ShieldAlert, ShieldQuestion,
+  Search, FolderInput, ArrowUp, ArrowDown, X, Home, CornerLeftUp, Image, Film, Music, FileText, FileArchive, File as FileIcon, HardDrive, ShieldCheck, ShieldAlert, ShieldQuestion, Link2, Copy, Trash,
 } from 'lucide-react'
 import { get, post, del, patch } from '../lib/api'
 import { uploadFile, uploadBundle, uploadTree, itemsFromFileList, itemsFromDataTransfer, itemsFromDirectoryPicker, supportsDirectoryPicker, supportsFilePicker, pickFilesWithHandles, rootFolderName } from '../lib/uploader'
@@ -434,6 +434,7 @@ export default function Files({ user }) {
                         <td className="p-3"><RowActions>
                           {f.status === 'ready' && <a href={`/api/files/${f.id}/download`} className="p-1 rounded hover:bg-ink-700 hover:text-white" title="Download"><Download size={16} /></a>}
                           {f.status === 'failed' && <IconBtn title="Retry" onClick={() => retry(f)}><RefreshCw size={16} /></IconBtn>}
+                          {f.status === 'ready' && <IconBtn title="Share link" onClick={() => setModal({ type: 'share', file: f })}><Link2 size={16} /></IconBtn>}
                           {f.status === 'ready' && <IconBtn title="Verify against the channel" onClick={() => verify(f)}><ShieldCheck size={16} /></IconBtn>}
                           <IconBtn title="Move" onClick={() => setModal({ type: 'move', items: { files: [f.id], folders: [] } })}><FolderInput size={16} /></IconBtn>
                           <IconBtn title="Rename" onClick={() => setModal({ type: 'rename', file: f })}><Pencil size={16} /></IconBtn>
@@ -460,6 +461,7 @@ export default function Files({ user }) {
       {modal?.type === 'rename' && <NameModal title="Rename" initial={modal.file.name} onClose={() => setModal(null)} onSubmit={async (name) => { await patch(`/api/files/${modal.file.id}`, { name }); setModal(null); load() }} />}
       {modal?.type === 'zip' && <ZipModal items={modal.items} onClose={() => setModal(null)} onSubmit={(items, name) => runZip(items, name, modal.target)} />}
       {modal?.type === 'move' && <MoveModal tree={tree} items={modal.items} currentFolderId={folderId} onClose={() => setModal(null)} onMove={(target) => moveItems(modal.items, target)} />}
+      {modal?.type === 'share' && <ShareModal file={modal.file} onClose={() => setModal(null)} />}
       {modal?.type === 'import' && <ImportModal folderId={folderId} onClose={() => setModal(null)} onDone={() => { setModal(null); load() }} />}
       {modal?.type === 'folder-upload' && <FolderUploadModal items={modal.items} root={modal.root} onClose={() => setModal(null)} onZip={(items, name) => runZip(items, name, modal.target)} onTree={(items, root) => runTree(items, root, modal.target)} />}
     </div>
@@ -691,6 +693,66 @@ function ImportModal({ folderId, onClose, onDone }) {
           <div className="flex justify-end gap-2"><button className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={!pick || busy} onClick={start}>{busy ? 'Starting…' : `Import ${pick ? pick.name : ''}`}</button></div>
         </div>
       )}
+    </Modal>
+  )
+}
+
+export function ShareModal({ file, onClose }) {
+  const [list, setList] = useState(null)
+  const [form, setForm] = useState({ label: '', expires_in_hours: '', max_downloads: '', password: '' })
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState('')
+  const load = () => get(`/api/files/${file.id}/shares`).then(setList).catch((e) => setError(e.message))
+  useEffect(() => { load() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+  const create = async (e) => {
+    e.preventDefault(); setError('')
+    try {
+      await post(`/api/files/${file.id}/shares`, {
+        label: form.label || null, expires_in_hours: form.expires_in_hours ? Number(form.expires_in_hours) : null,
+        max_downloads: form.max_downloads ? Number(form.max_downloads) : null, password: form.password || null,
+      })
+      setForm({ label: '', expires_in_hours: '', max_downloads: '', password: '' }); load()
+    } catch (err) { setError(err.message) }
+  }
+  const copy = async (s) => { try { await navigator.clipboard.writeText(s.url); setCopied(s.id); setTimeout(() => setCopied(''), 1500) } catch { prompt('Copy the link:', s.url) } }
+  const toggle = async (s) => { try { await post(`/api/shares/${s.id}/toggle`); load() } catch (err) { setError(err.message) } }
+  const remove = async (s) => { if (!confirm('Delete this link? Anyone holding it loses access.')) return; try { await del(`/api/shares/${s.id}`); load() } catch (err) { setError(err.message) } }
+  return (
+    <Modal title={`Share "${file.name}"`} onClose={onClose}>
+      <div className="space-y-4">
+        <div className="space-y-2">
+          {list === null && <div className="text-sm text-ink-400">Loading…</div>}
+          {list?.length === 0 && <div className="text-sm text-ink-400">No links yet. Create one below.</div>}
+          {(list || []).map((s) => (
+            <div key={s.id} className={`rounded-lg border p-2 text-sm ${s.active ? 'border-ink-700' : 'border-ink-800 opacity-60'}`}>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 truncate text-xs text-ink-300">{s.url}</code>
+                <button className="btn-ghost" onClick={() => copy(s)} title="Copy link">{copied === s.id ? 'Copied' : <Copy size={14} />}</button>
+                <button className="btn-ghost" onClick={() => toggle(s)}>{s.disabled ? 'Enable' : 'Disable'}</button>
+                <button className="btn-ghost" onClick={() => remove(s)} title="Delete"><Trash size={14} /></button>
+              </div>
+              <div className="text-xs text-ink-400 mt-1">
+                {s.label && <span>{s.label} · </span>}
+                {s.download_count} download{s.download_count === 1 ? '' : 's'}{s.max_downloads != null && ` of ${s.max_downloads}`}
+                {s.expires_at && ` · expires ${when(s.expires_at)}`}{s.has_password && ' · password'}{s.disabled && ' · disabled'}
+                {!s.active && !s.disabled && ' · no longer active'}
+              </div>
+            </div>
+          ))}
+        </div>
+        <form onSubmit={create} className="space-y-2 border-t border-ink-800 pt-3">
+          <div className="text-xs uppercase tracking-wide text-ink-400">New link</div>
+          <div className="grid grid-cols-2 gap-2">
+            <input className="input" placeholder="label (optional)" value={form.label} onChange={(e) => setForm({ ...form, label: e.target.value })} />
+            <input className="input" type="password" placeholder="password (optional)" autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            <input className="input" type="number" min="1" placeholder="expires in hours (optional)" value={form.expires_in_hours} onChange={(e) => setForm({ ...form, expires_in_hours: e.target.value })} />
+            <input className="input" type="number" min="1" placeholder="max downloads (optional)" value={form.max_downloads} onChange={(e) => setForm({ ...form, max_downloads: e.target.value })} />
+          </div>
+          <p className="text-xs text-ink-400">Downloads stream through this server from the channel, so the link works only while the server is reachable at that address.</p>
+          <Alert>{error}</Alert>
+          <div className="flex justify-end gap-2"><button type="button" className="btn-ghost" onClick={onClose}>Close</button><button className="btn-primary"><Link2 size={16} /> Create link</button></div>
+        </form>
+      </div>
     </Modal>
   )
 }

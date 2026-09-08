@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__, config, db as _db, security, status as status_mod
-from app.routers import admin, auth, files, setup, telegram, transfers, uploads
+from app.routers import admin, auth, files, setup, shares, telegram, transfers, uploads
 from app.telegram.manager import manager
 from app.transfers import worker as transfer_worker
 
@@ -43,7 +43,8 @@ app = FastAPI(title="OpenTelegramStorage", version=__version__, lifespan=lifespa
 async def security_headers_and_csrf(request: Request, call_next):
     path = request.url.path
     if (path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH", "DELETE")
-            and path not in CSRF_EXEMPT and request.cookies.get(security.SESSION_COOKIE)):
+            and path not in CSRF_EXEMPT and not path.startswith("/api/share/")
+            and request.cookies.get(security.SESSION_COOKIE)):
         if not security.csrf_ok(request):
             return JSONResponse({"detail": "CSRF token missing or invalid"}, status_code=403)
     response = await call_next(request)
@@ -54,7 +55,7 @@ async def security_headers_and_csrf(request: Request, call_next):
     return response
 
 
-for r in (setup, auth, telegram, files, uploads, transfers, admin):
+for r in (setup, auth, telegram, files, uploads, transfers, admin, shares):
     app.include_router(r.router)
 
 

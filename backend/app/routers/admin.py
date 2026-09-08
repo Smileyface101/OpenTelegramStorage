@@ -36,6 +36,8 @@ async def update_settings(data: SettingsUpdate, db: AsyncSession = Depends(get_d
         await settings_store.set(db, "transfer.upload_connections", str(data.upload_connections))
     if data.stale_upload_hours is not None:
         await settings_store.set(db, "transfer.stale_upload_hours", str(data.stale_upload_hours))
+    if data.public_url is not None:
+        await settings_store.set(db, "app.public_url", data.public_url.strip().rstrip("/"))
     await db.commit()
     return await settings_store.public_settings(db)
 

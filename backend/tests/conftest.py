@@ -55,8 +55,10 @@ def fake_manager(monkeypatch):
     fm = FakeManager()
     import app.routers.admin as admin_router
     import app.routers.files as files_router
+    import app.routers.shares as shares_router
     monkeypatch.setattr(files_router, "manager", fm)
     monkeypatch.setattr(admin_router, "manager", fm)
+    monkeypatch.setattr(shares_router, "manager", fm)
     transfer_worker.worker = transfer_worker.TransferWorker(fm, poll_interval=0.01)
     yield fm
     transfer_worker.worker = None

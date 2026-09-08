@@ -104,6 +104,7 @@ class SettingsUpdate(BaseModel):
     compress_archives: bool | None = None
     upload_connections: int | None = Field(default=None, ge=1, le=16)
     stale_upload_hours: int | None = Field(default=None, ge=0, le=24 * 365)
+    public_url: str | None = Field(default=None, max_length=300)
 
 
 class UploadComplete(BaseModel):
@@ -132,3 +133,14 @@ class TotpCode(BaseModel):
 class TotpDisable(BaseModel):
     password: str
     code: str = Field(min_length=4, max_length=32)  # TOTP or recovery code
+
+
+class ShareCreate(BaseModel):
+    label: str | None = Field(default=None, max_length=120)
+    expires_in_hours: int | None = Field(default=None, ge=1, le=24 * 365)
+    max_downloads: int | None = Field(default=None, ge=1, le=1000000)
+    password: str | None = Field(default=None, min_length=4, max_length=128)
+
+
+class SharePassword(BaseModel):
+    password: str = Field(max_length=128)

@@ -194,3 +194,31 @@ class Bundle(Base):
     written: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)  # archive bytes emitted so far
     completed_members: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+# ============================================================================
+# SHARE LINKS
+# ============================================================================
+
+def new_share_token() -> str:
+    import secrets
+    return secrets.token_urlsafe(24)
+
+
+class Share(Base):
+    """A public download link for one file. Optional expiry, download cap and
+    password (argon2). The token is the URL; nothing else is guessable."""
+    __tablename__ = "shares"
+    id: Mapped[str] = mapped_column(String(48), primary_key=True, default=new_share_token)
+    file_id: Mapped[str] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), index=True, nullable=False)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    max_downloads: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    download_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    last_access_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    file: Mapped[File] = relationship()
