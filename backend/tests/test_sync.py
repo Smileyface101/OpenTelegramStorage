@@ -105,7 +105,7 @@ async def test_catch_up_after_downtime(api, admin, fake_manager):
     fid_b, _ = _other_server_uploads(fake_manager, "b.bin", b"b" * 500, 1000)
     await fake_manager.send_text(sync.make_event("delete", id=fid_a, by="laptop/alice"))
     res = await sync.catch_up(fake_manager)
-    assert res["parts"] == 3 and res["events"] == 1
+    assert res["parts"] == 3 and res["events"] >= 1  # the delete, plus our own layout/hello echoes
     names = sorted(x["name"] for x in (await api.get("/api/files")).json()["files"])
     assert names == ["b.bin"]
     # Second run scans nothing new.
@@ -196,3 +196,42 @@ async def test_local_changes_emit_events_and_echo_is_harmless(api, admin, fake_m
     await api.delete(f"/api/folders/{top['id']}")
     kinds = [e["t"] for e in _events(fake_manager, since)]
     assert kinds == ["folder_create", "folder_move", "delete", "folder_delete"]
+
+
+async def test_layout_publish_and_apply(api, admin, fake_manager):
+    # Server A (us) has a layout made before sharing: empty folder, moved + renamed file.
+    f = (await _upload(api, "orig.txt", b"o" * 50))["file"]
+    await _drain(transfer_worker.worker)
+    empty = (await api.post("/api/folders", json={"name": "Empty"})).json()
+    dest = (await api.post("/api/folders/ensure", json={"path": "Docs/2026"})).json()
+    await api.patch(f"/api/files/{f['id']}", json={"name": "final.txt"})
+    await api.post(f"/api/files/{f['id']}/move", json={"folder_id": dest["id"]})
+    before = set(fake_manager.messages)
+    # Switching to shared publishes the layout and says hello.
+    await api.put("/api/admin/settings", json={"workspace_mode": "shared", "workspace_name": "home"})
+    evs = _events(fake_manager, before)
+    kinds = [e["t"] for e in evs]
+    assert kinds == ["tree", "place", "hello"], kinds
+    assert sorted(evs[0]["folders"]) == ["Docs", "Docs/2026", "Empty"]
+    assert evs[1]["files"][f["id"]] == ["Docs/2026", "final.txt"]
+    # Server B: fresh index from captions only (file at root, original name), then applies the layout.
+    from sqlalchemy import delete
+    from app import db as _db
+    from app.models import File, FilePart, Folder
+    async with _db.async_session() as db:
+        await db.execute(delete(FilePart)); await db.execute(delete(File)); await db.execute(delete(Folder)); await db.commit()
+    await api.put("/api/admin/settings", json={"workspace_name": "other"})  # pretend to be the other server
+    mid, (name, blob, cap) = next((m, v) for m, v in sorted(fake_manager.messages.items()) if v[1] is not None)
+    await sync.handle_post(mid, json.dumps(cap), len(blob))
+    g = (await api.get(f"/api/files/{f['id']}")).json()
+    assert g["name"] == "orig.txt" and g["folder_id"] is None
+    for e in evs[:2]:  # tree + place (the hello would make us publish in turn)
+        m = await fake_manager.send_text(json.dumps(e)); await sync.handle_post(m, json.dumps(e), None)
+    g = (await api.get(f"/api/files/{f['id']}")).json()
+    tree = (await api.get("/api/folders/tree")).json()
+    assert [(t["name"], t["depth"]) for t in tree] == [("Docs", 0), ("2026", 1), ("Empty", 0)]
+    assert g["name"] == "final.txt" and g["folder_id"] == next(t["id"] for t in tree if t["name"] == "2026")
+    # A hello from another server queues a layout publication for the worker.
+    assert sync.take_hello_request() is False
+    hello = sync.make_event("hello", by="laptop/system"); m = await fake_manager.send_text(hello); await sync.handle_post(m, hello, None)
+    assert sync.take_hello_request() is True

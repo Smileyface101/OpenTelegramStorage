@@ -45,6 +45,8 @@ async def _clean_tables():
             await conn.execute(table.delete())
     security.login_throttle.reset()
     transfer_worker.progress.active.clear()
+    from app import sync as _sync
+    _sync._hello_pending.clear(); _sync._last_hello_reply = 0.0
     for leftover in config.STAGING_DIR.glob("*"):
         leftover.unlink()
     yield

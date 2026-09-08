@@ -25,6 +25,19 @@ logger = logging.getLogger(__name__)
 
 EVENT_KEY = "ots-ev"
 BATCH = 100
+EVENT_MAX_CHARS = 3500          # Telegram messages cap at 4096 characters
+HELLO_MIN_INTERVAL = 600.0      # seconds between layout publications triggered by "hello"
+_last_hello_reply = 0.0
+
+
+_hello_pending: list = []   # set by apply_event("hello"); drained by the worker loop
+
+
+def take_hello_request() -> bool:
+    if _hello_pending:
+        _hello_pending.clear()
+        return True
+    return False
 
 
 def make_event(kind: str, **fields) -> str:
@@ -205,6 +218,37 @@ async def apply_event(db, ev: dict) -> bool:
             return False
         await _ensure_path(db, owner, ev.get("path"))
         return True
+    if kind == "tree":
+        # Full folder list from another server (published layout).
+        owner = await _owner_id(db)
+        if owner is None:
+            return False
+        for path in ev.get("folders") or []:
+            await _ensure_path(db, owner, str(path))
+        return True
+    if kind == "place":
+        # {id: [path, name]} for a batch of files: current location and name.
+        owner = await _owner_id(db)
+        changed = False
+        for fid, spec in (ev.get("files") or {}).items():
+            f = await db.get(File, str(fid))
+            if f is None or not isinstance(spec, list) or len(spec) != 2 or not _newer(ts, f.meta_updated_at):
+                continue
+            path, name = spec
+            f.folder_id = await _ensure_path(db, owner, path) if path else None
+            if name:
+                f.name = str(name)[:255]
+            f.meta_updated_at = ts
+            changed = True
+        return changed
+    if kind == "hello":
+        # A server joined or rebuilt: publish our layout so it can catch up.
+        global _last_hello_reply
+        import time as _time
+        if _time.monotonic() - _last_hello_reply > HELLO_MIN_INTERVAL:
+            _last_hello_reply = _time.monotonic()
+            _hello_pending.append(True)
+        return False
     if kind in ("folder_rename", "folder_move", "folder_delete"):
         folder = await resolve_path(db, ev.get("path"))
         if folder is None:
@@ -334,3 +378,62 @@ async def announce_delete(manager, file_id: str, by: str | None) -> None:
 async def label(db, username: str) -> str:
     name = (await settings_store.get(db, "workspace.name")) or "server"
     return f"{name}/{username}"[:120]
+
+
+async def layout_events(db, by: str | None) -> list[str]:
+    """Compact description of this server's current tree: every folder path,
+    then every file's (path, name), split into messages under Telegram's size
+    limit. Lets a joining server reproduce empty folders, moves and renames
+    that captions cannot express."""
+    folders = (await db.execute(select(Folder))).scalars().all()
+    by_id = {f.id: f for f in folders}
+    paths = []
+    for f in folders:
+        names, cur, seen = [], f, set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id); names.append(cur.name); cur = by_id.get(cur.parent_id)
+        paths.append("/".join(reversed(names)))
+    paths.sort(key=lambda p: (p.count("/"), p))
+    events: list[str] = []
+    batch: list[str] = []
+    for path in paths:
+        batch.append(path)
+        if len(json.dumps(batch)) > EVENT_MAX_CHARS - 200:
+            events.append(make_event("tree", folders=batch[:-1], by=by)); batch = [path]
+    if batch:
+        events.append(make_event("tree", folders=batch, by=by))
+    files = (await db.execute(select(File.id, File.name, File.folder_id).where(File.status == FileStatus.READY))).all()
+    folder_paths: dict = {}
+    for f in folders:
+        names, cur, seen = [], f, set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id); names.append(cur.name); cur = by_id.get(cur.parent_id)
+        folder_paths[f.id] = "/".join(reversed(names))
+    chunk: dict = {}
+    for fid, name, folder_id in files:
+        chunk[fid] = [folder_paths.get(folder_id) if folder_id else None, name]
+        if len(json.dumps(chunk)) > EVENT_MAX_CHARS - 200:
+            last = chunk.popitem()
+            events.append(make_event("place", files=chunk, by=by)); chunk = dict([last])
+    if chunk:
+        events.append(make_event("place", files=chunk, by=by))
+    return events
+
+
+async def publish_layout(manager, by: str | None) -> int:
+    async with _db.async_session() as db:
+        if not await settings_store.shared_mode(db):
+            return 0
+        events = await layout_events(db, by)
+    for text in events:
+        await manager.send_text(text)
+    logger.info("sync: published layout in %d message(s)", len(events))
+    return len(events)
+
+
+async def say_hello(manager, by: str | None) -> None:
+    """Ask the other servers for their layout (after joining or rebuilding)."""
+    try:
+        await manager.send_text(make_event("hello", by=by))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("sync: hello failed: %s", e)

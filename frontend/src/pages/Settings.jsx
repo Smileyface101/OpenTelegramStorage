@@ -457,7 +457,8 @@ function WorkspaceSection() {
     e.preventDefault(); setMsg(''); setError('')
     try { setS(await put('/api/admin/settings', { workspace_mode: s.workspace_mode, workspace_name: s.workspace_name })); setMsg('Saved') } catch (err) { setError(err.message) }
   }
-  const syncNow = async () => { setBusy(true); setError(''); setMsg(''); try { const r = await post('/api/admin/sync/catch-up'); setMsg(`Scanned ${r.scanned} new message(s): ${r.parts} part(s), ${r.events} event(s); checked ${r.checked} part(s), removed ${r.removed} file(s) no longer in the channel.`) } catch (err) { setError(err.message) } finally { setBusy(false) } }
+  const syncNow = async () => { setBusy(true); setError(''); setMsg(''); try { const r = await post('/api/admin/sync/catch-up'); setMsg(`Scanned ${r.scanned} new message(s): ${r.parts} part(s), ${r.events} event(s); checked ${r.checked} part(s), removed ${r.removed} file(s) no longer in the channel. Asked the other servers for their folder layout.`) } catch (err) { setError(err.message) } finally { setBusy(false) } }
+  const publish = async () => { setBusy(true); setError(''); setMsg(''); try { const r = await post('/api/admin/sync/publish-layout'); setMsg(`Folder layout published in ${r.messages} message(s); other servers apply it within seconds.`) } catch (err) { setError(err.message) } finally { setBusy(false) } }
   if (!s) return null
   const shared = s.workspace_mode === 'shared'
   return (
@@ -474,7 +475,8 @@ function WorkspaceSection() {
         <div><label className="label">This server's name</label><input className="input" placeholder="e.g. home" value={s.workspace_name || ''} onChange={(e) => setS({ ...s, workspace_name: e.target.value })} />
           <p className="text-xs text-ink-400 mt-1">Shown as "name/username" next to files uploaded from here. Must be different on every server that shares the channel.</p></div>
         <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
-        <div className="flex gap-2"><button className="btn-primary">Save</button>{shared && <button type="button" className="btn-ghost" disabled={busy} onClick={syncNow}>{busy ? 'Syncing…' : 'Sync with channel now'}</button>}</div>
+        <div className="flex flex-wrap gap-2"><button className="btn-primary">Save</button>{shared && <button type="button" className="btn-ghost" disabled={busy} onClick={syncNow}>{busy ? 'Working…' : 'Sync with channel now'}</button>}{shared && <button type="button" className="btn-ghost" disabled={busy} onClick={publish}>Publish folder layout</button>}</div>
+        {shared && <p className="text-xs text-ink-400">Folders and file placements made before this server was shared are not in the channel captions. "Publish folder layout" posts the current tree and every file's location and name so other servers match it; switching to Shared does this once automatically, and a server that joins or rebuilds asks for it.</p>}
       </form>
     </Section>
   )

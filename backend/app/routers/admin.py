@@ -42,10 +42,25 @@ async def update_settings(data: SettingsUpdate, db: AsyncSession = Depends(get_d
         await settings_store.set(db, "content.encrypt_new", "true" if data.encrypt_new else "false")
         if data.encrypt_new:
             await crypto.ensure_key(db)
+    became_shared = False
     if data.workspace_mode is not None:
+        was = await settings_store.get(db, "workspace.mode")
         await settings_store.set(db, "workspace.mode", data.workspace_mode)
+        became_shared = data.workspace_mode == "shared" and was != "shared"
     if data.workspace_name is not None:
         await settings_store.set(db, "workspace.name", data.workspace_name.strip()[:60])
+    if became_shared:
+        await db.commit()
+        # Joining a workspace: offer our layout and ask for theirs.
+        from app import sync
+        if manager.ready():
+            by = await sync.label(db, user.username)
+            try:
+                await sync.publish_layout(manager, by)
+                await sync.say_hello(manager, by)
+            except Exception as e:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).warning("layout exchange on join failed: %s", e)
     await db.commit()
     return await settings_store.public_settings(db)
 
@@ -239,12 +254,23 @@ async def encryption_import(data: KeyImport, db: AsyncSession = Depends(get_db),
     return {"key_id": crypto.key_id_of(bytes.fromhex(data.key))}
 
 
+@router.post("/sync/publish-layout")
+async def sync_publish_layout(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
+    """Post this server's folder tree and file placements for the other servers."""
+    from app import sync
+    if not manager.ready():
+        raise HTTPException(503, "Telegram is not connected")
+    n = await sync.publish_layout(manager, await sync.label(db, user.username))
+    return {"messages": n}
+
+
 @router.post("/sync/catch-up")
-async def sync_now(user: User = Depends(security.current_admin)):
+async def sync_now(db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
     """Shared workspaces: scan the channel for posts and events from other servers now."""
     from app import sync
     if not manager.ready():
         raise HTTPException(503, "Telegram is not connected")
     caught = await sync.catch_up(manager)
     checked = await sync.reconcile(manager)
+    await sync.say_hello(manager, await sync.label(db, user.username))
     return {**caught, **checked}

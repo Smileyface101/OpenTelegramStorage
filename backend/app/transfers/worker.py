@@ -138,6 +138,11 @@ class TransferWorker:
                     next_catchup = now + SYNC_CATCHUP_INTERVAL
                     from app import sync
                     await sync.catch_up(self.manager)
+                from app import sync as _sync
+                if _sync.take_hello_request() and self.manager.ready():
+                    async with _db.async_session() as db:
+                        name = (await settings_store.get(db, "workspace.name")) or "server"
+                    await _sync.publish_layout(self.manager, f"{name}/system")
                 if now >= next_reconcile and self.manager.ready():
                     next_reconcile = now + SYNC_RECONCILE_INTERVAL
                     from app import sync

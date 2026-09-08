@@ -88,6 +88,12 @@ async def rebuild(manager, owner_id: int, part_size_default: int) -> RebuildStat
         state = RebuildState(running=True, started_at=datetime.utcnow().isoformat())
         try:
             await _rebuild(manager, owner_id, part_size_default)
+            async with _db.async_session() as db:
+                from app import settings_store
+                if await settings_store.shared_mode(db):
+                    from app import sync
+                    name = (await settings_store.get(db, "workspace.name")) or "server"
+                    await sync.say_hello(manager, f"{name}/system")
         except Exception as e:  # noqa: BLE001
             logger.exception("index rebuild failed")
             state.error = str(e)
