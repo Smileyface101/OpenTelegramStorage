@@ -24,3 +24,6 @@ frontend/dist/
 .DS_Store
 .claude/
 .opencode/
+
+# build output of scripts/windows/build-package.sh
+/dist/

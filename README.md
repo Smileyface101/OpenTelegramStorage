@@ -58,6 +58,11 @@ pick the channel, and start dropping files.
 
 <p align="center"><img src="docs/images/setup-wizard.png" alt="Setup wizard" width="700"></p>
 
+**Windows without Docker:** download `OpenTelegramStorage-windows-x64.zip`
+from the [releases page](https://github.com/Smileyface101/OpenTelegramStorage/releases),
+unzip, run `install.cmd`. It contains Python and everything else; nothing to
+install first. Details in `scripts/windows/`.
+
 Port taken? Set `OTS_PORT=8090` in a `.env` file next to `docker-compose.yml`.
 Prefer a prebuilt image? `ghcr.io/smileyface101/opentelegramstorage:latest`
 is published from every release; the compose file uses it and falls back to

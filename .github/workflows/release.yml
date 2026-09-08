@@ -36,3 +36,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  windows-package:
+    # Self-contained Windows x64 zip (embedded Python + deps + app), attached to the release.
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: cd frontend && npm ci && npm run build
+      - run: scripts/windows/build-package.sh
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/OpenTelegramStorage-windows-x64.zip
+          generate_release_notes: true
