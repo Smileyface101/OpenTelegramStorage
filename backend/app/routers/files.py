@@ -6,6 +6,7 @@ import os
 import re
 from datetime import datetime
 
+from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
@@ -367,11 +368,16 @@ def stream_file(f: File, request: Request, key: bytes | None = None) -> Streamin
             h = hashlib.sha256() if full else None
             doc = await manager.get_document(p.message_id)
             source = crypto.decrypt_range(manager, doc, p, key, from_off, take) if f.encrypted else manager.iter_download(doc, from_off, take)
-            async for chunk in source:
-                remaining -= len(chunk)
-                if h is not None:
-                    h.update(chunk)
-                yield chunk
+            try:
+                async for chunk in source:
+                    remaining -= len(chunk)
+                    if h is not None:
+                        h.update(chunk)
+                    yield chunk
+            except InvalidTag:
+                # Authentication tag failed: ciphertext was altered in the channel.
+                await integrity.record_mismatch(file_id, f"part {p.index + 1}: decryption failed (tampered or corrupt)")
+                raise RuntimeError(f"Integrity failure: part {p.index + 1} of {file_name} could not be decrypted")
             if h is not None and h.hexdigest() != p.sha256:
                 await integrity.record_mismatch(file_id, f"part {p.index + 1}: checksum mismatch on download")
                 raise RuntimeError(f"Integrity failure: part {p.index + 1} of {file_name} does not match its checksum")
