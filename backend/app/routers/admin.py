@@ -82,6 +82,21 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(get_db), user: Us
     return {"ok": True}
 
 
+@router.post("/users/{user_id}/totp/reset")
+async def reset_user_totp(user_id: int, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
+    """Switch off a user's two-factor (lost phone + no recovery codes). Also
+    signs them out everywhere so the reset cannot be abused silently."""
+    target = await db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "User not found")
+    target.totp_enabled = False
+    target.totp_secret = None
+    target.recovery_codes = None
+    await db.execute(delete(Session).where(Session.user_id == target.id))
+    await db.commit()
+    return user_out(target)
+
+
 @router.post("/users/{user_id}/toggle")
 async def toggle_user(user_id: int, db: AsyncSession = Depends(get_db), user: User = Depends(security.current_admin)):
     if user_id == user.id:

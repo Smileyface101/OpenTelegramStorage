@@ -3,6 +3,7 @@ import { get, post, put, del } from '../lib/api'
 import { bytes, when } from '../lib/format'
 import { Alert } from '../components/ui'
 import { BotStep, ChannelStep } from './Setup'
+import QRCode from 'qrcode'
 
 export default function Settings({ user, onChange }) {
   const isAdmin = user?.role === 'admin'
@@ -13,6 +14,8 @@ export default function Settings({ user, onChange }) {
       {isAdmin && <TransferSection />}
       {isAdmin && <RecoverySection />}
       <PasswordSection />
+      <TwoFactorSection />
+      <SessionsSection />
       {isAdmin && <UsersSection me={user} />}
     </div>
   )
@@ -173,9 +176,10 @@ function UsersSection({ me }) {
       <ul className="divide-y divide-ink-800 text-sm">
         {users.map((u) => (
           <li key={u.id} className="py-2 flex items-center justify-between gap-2">
-            <span>{u.username} <span className="text-xs text-ink-400">{u.role}{!u.is_active && ' · disabled'}</span></span>
+            <span>{u.username} <span className="text-xs text-ink-400">{u.role}{u.totp_enabled && ' · 2FA'}{!u.is_active && ' · disabled'}</span></span>
             {u.id !== me.id && (
               <span className="flex gap-2">
+                {u.totp_enabled && <button className="btn-ghost" title="Switch off this user's two-factor (lost phone) and sign them out everywhere" onClick={() => confirm(`Reset two-factor for ${u.username}? They will be signed out everywhere.`) && act(() => post(`/api/admin/users/${u.id}/totp/reset`))}>Reset 2FA</button>}
                 <button className="btn-ghost" onClick={() => act(() => post(`/api/admin/users/${u.id}/toggle`))}>{u.is_active ? 'Disable' : 'Enable'}</button>
                 <button className="btn-danger" onClick={() => confirm(`Delete user ${u.username}?`) && act(() => del(`/api/admin/users/${u.id}`))}>Delete</button>
               </span>
@@ -221,6 +225,108 @@ function RecoverySection() {
       {st?.log?.length > 0 && (
         <pre className="max-h-40 overflow-auto rounded-lg bg-ink-950 p-3 text-xs text-ink-400">{st.log.join('\n')}</pre>
       )}
+      <Alert>{error}</Alert>
+    </Section>
+  )
+}
+
+function TwoFactorSection() {
+  const [st, setSt] = useState(null)
+  const [setup, setSetup] = useState(null)      // { secret, uri, qr }
+  const [code, setCode] = useState('')
+  const [codes, setCodes] = useState(null)      // freshly issued recovery codes
+  const [disable, setDisable] = useState(null)  // { password, code }
+  const [error, setError] = useState('')
+  const [msg, setMsg] = useState('')
+  const load = () => get('/api/auth/totp').then(setSt).catch(() => {})
+  useEffect(() => { load() }, [])
+  const begin = async () => {
+    setError(''); setMsg(''); setCodes(null)
+    try { const r = await post('/api/auth/totp/setup'); const qr = await QRCode.toDataURL(r.uri, { margin: 1, width: 200 }); setSetup({ ...r, qr }) } catch (e) { setError(e.message) }
+  }
+  const enable = async (e) => {
+    e.preventDefault(); setError('')
+    try { const r = await post('/api/auth/totp/enable', { code: code.trim() }); setCodes(r.recovery_codes); setSetup(null); setCode(''); setMsg('Two-factor is on. Other sessions were signed out.'); load() } catch (err) { setError(err.message) }
+  }
+  const regen = async () => {
+    const c = prompt('Enter a current authenticator code to issue new recovery codes (old ones stop working):')
+    if (!c) return
+    setError('')
+    try { const r = await post('/api/auth/totp/recovery-codes', { code: c.trim() }); setCodes(r.recovery_codes); load() } catch (err) { setError(err.message) }
+  }
+  const doDisable = async (e) => {
+    e.preventDefault(); setError('')
+    try { await post('/api/auth/totp/disable', disable); setDisable(null); setCodes(null); setMsg('Two-factor is off.'); load() } catch (err) { setError(err.message) }
+  }
+  if (!st) return null
+  return (
+    <Section title="Two-factor authentication">
+      <p className="text-sm text-ink-300">{st.enabled ? <>Enabled. Signing in needs your password plus a code from your authenticator app. <b>{st.recovery_codes_left}</b> recovery codes left.</> : 'Off. Add a second step to sign-in using any authenticator app (Aegis, Google Authenticator, 1Password, Bitwarden…).'}</p>
+      {!st.enabled && !setup && <button className="btn-primary" onClick={begin}>Set up two-factor</button>}
+      {setup && (
+        <form onSubmit={enable} className="space-y-3">
+          <div className="flex flex-col sm:flex-row gap-4 items-start">
+            <img src={setup.qr} alt="QR code" className="rounded-lg bg-white p-1 w-[200px] h-[200px]" />
+            <div className="text-sm text-ink-300 space-y-2">
+              <p>1. Scan this with your authenticator app.</p>
+              <p>2. Or enter the key by hand: <code className="bg-ink-800 px-1 rounded break-all">{setup.secret}</code></p>
+              <p>3. Type the 6-digit code the app shows to confirm.</p>
+            </div>
+          </div>
+          <div className="flex gap-2"><input className="input max-w-[200px] tracking-widest" inputMode="numeric" placeholder="123456" value={code} onChange={(e) => setCode(e.target.value)} /><button className="btn-primary" disabled={code.length < 6}>Turn on</button><button type="button" className="btn-ghost" onClick={() => setSetup(null)}>Cancel</button></div>
+        </form>
+      )}
+      {codes && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
+          <div className="text-sm font-medium text-amber-200">Recovery codes — save these now, they are shown once</div>
+          <p className="text-xs text-ink-300">Each code signs you in once if you lose your authenticator. Keep them somewhere safe, not in this browser.</p>
+          <pre className="grid grid-cols-2 gap-x-6 text-sm font-mono">{codes.map((c) => <span key={c}>{c}</span>)}</pre>
+          <button className="btn-ghost" onClick={() => navigator.clipboard?.writeText(codes.join('\n'))}>Copy</button>
+        </div>
+      )}
+      {st.enabled && !disable && (
+        <div className="flex flex-wrap gap-2">
+          <button className="btn-ghost" onClick={regen}>New recovery codes</button>
+          <button className="btn-danger" onClick={() => setDisable({ password: '', code: '' })}>Turn off</button>
+        </div>
+      )}
+      {disable && (
+        <form onSubmit={doDisable} className="space-y-2">
+          <p className="text-xs text-ink-400">Confirm with your password and a current code (or a recovery code).</p>
+          <div className="grid sm:grid-cols-3 gap-2">
+            <input className="input" type="password" autoComplete="current-password" placeholder="password" value={disable.password} onChange={(e) => setDisable({ ...disable, password: e.target.value })} />
+            <input className="input" placeholder="code" value={disable.code} onChange={(e) => setDisable({ ...disable, code: e.target.value })} />
+            <div className="flex gap-2"><button className="btn-danger">Turn off</button><button type="button" className="btn-ghost" onClick={() => setDisable(null)}>Cancel</button></div>
+          </div>
+        </form>
+      )}
+      <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
+    </Section>
+  )
+}
+
+function SessionsSection() {
+  const [list, setList] = useState([])
+  const [error, setError] = useState('')
+  const load = () => get('/api/auth/sessions').then(setList).catch((e) => setError(e.message))
+  useEffect(() => { load() }, [])
+  const revoke = async (s) => { setError(''); try { await del(`/api/auth/sessions/${s.id}`); load() } catch (e) { setError(e.message) } }
+  const revokeOthers = async () => { if (!confirm('Sign out every other device?')) return; setError(''); try { await post('/api/auth/sessions/revoke-others'); load() } catch (e) { setError(e.message) } }
+  const ua = (s) => { const u = s.user_agent || ''; const m = u.match(/(Firefox|Edg|Chrome|Safari)\/[\d.]+/); const os = /Windows/.test(u) ? 'Windows' : /Mac OS/.test(u) ? 'macOS' : /Android/.test(u) ? 'Android' : /iPhone|iPad/.test(u) ? 'iOS' : /Linux/.test(u) ? 'Linux' : ''; return `${m ? m[1].replace('Edg', 'Edge') : (u.slice(0, 24) || 'unknown client')}${os ? ' · ' + os : ''}` }
+  return (
+    <Section title="Signed-in devices">
+      <ul className="divide-y divide-ink-800 text-sm">
+        {list.map((s) => (
+          <li key={s.id} className="py-2 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="truncate">{ua(s)} {s.current && <span className="ml-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs text-emerald-300">this device</span>}</div>
+              <div className="text-xs text-ink-400">{s.ip} · signed in {when(s.created_at)} · last seen {when(s.last_seen_at)}</div>
+            </div>
+            {!s.current && <button className="btn-ghost" onClick={() => revoke(s)}>Sign out</button>}
+          </li>
+        ))}
+      </ul>
+      {list.length > 1 && <button className="btn-danger" onClick={revokeOthers}>Sign out all other devices</button>}
       <Alert>{error}</Alert>
     </Section>
   )

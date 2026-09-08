@@ -18,7 +18,7 @@ logging.basicConfig(level=os.getenv("OTS_LOG_LEVEL", "INFO"),
 logger = logging.getLogger("ots")
 status_mod.install_log_capture()
 
-CSRF_EXEMPT = ("/api/auth/login", "/api/setup/admin")
+CSRF_EXEMPT = ("/api/auth/login", "/api/auth/login/mfa", "/api/setup/admin")
 
 
 @asynccontextmanager

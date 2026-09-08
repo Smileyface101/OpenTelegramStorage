@@ -169,3 +169,122 @@ def record_failure(user: User) -> None:
 def record_success(user: User) -> None:
     user.failed_logins = 0
     user.locked_until = None
+
+
+# ---------------------------------------------------------------------------
+# Two-factor authentication (TOTP, RFC 6238) and recovery codes
+# ---------------------------------------------------------------------------
+import base64 as _b64
+import json as _json
+import os as _os
+
+import pyotp
+
+from app import vault
+
+TOTP_ISSUER = "OpenTelegramStorage"
+RECOVERY_CODE_COUNT = 10
+MFA_PENDING_TTL_SECONDS = 300
+MFA_MAX_ATTEMPTS = 5
+
+
+def totp_new_secret() -> str:
+    return pyotp.random_base32()
+
+
+def totp_uri(secret: str, username: str) -> str:
+    return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name=TOTP_ISSUER)
+
+
+def totp_verify(user: User, code: str) -> bool:
+    """Verify a 6-digit code with ±1 step tolerance, refusing reuse of the
+    same time step (replay guard)."""
+    if not user.totp_secret:
+        return False
+    code = (code or "").strip().replace(" ", "")
+    if not code.isdigit():
+        return False
+    secret = vault.decrypt(user.totp_secret)
+    totp = pyotp.TOTP(secret)
+    now = int(time.time())
+    for offset in (0, -1, 1):
+        t = now + offset * totp.interval
+        if totp.verify(code, for_time=t, valid_window=0):
+            counter = t // totp.interval
+            if counter <= user.totp_last_counter:
+                return False
+            user.totp_last_counter = counter
+            return True
+    return False
+
+
+def _code_hash(code: str) -> str:
+    return hashlib.sha256(code.encode("ascii")).hexdigest()
+
+
+def recovery_generate(user: User) -> list[str]:
+    """Create fresh recovery codes; returns the plaintext list (shown once)."""
+    codes = ["-".join(_b64.b32encode(_os.urandom(5)).decode("ascii").lower()[i:i + 4] for i in (0, 4)) for _ in range(RECOVERY_CODE_COUNT)]
+    user.recovery_codes = _json.dumps([_code_hash(c) for c in codes])
+    return codes
+
+
+def recovery_use(user: User, code: str) -> bool:
+    """Consume a recovery code. Returns True if it was valid."""
+    if not user.recovery_codes:
+        return False
+    code = (code or "").strip().lower().replace(" ", "")
+    if not code:
+        return False
+    hashes = _json.loads(user.recovery_codes)
+    h = _code_hash(code)
+    for stored in hashes:
+        if secrets.compare_digest(stored, h):
+            hashes.remove(stored)
+            user.recovery_codes = _json.dumps(hashes)
+            return True
+    return False
+
+
+def recovery_remaining(user: User) -> int:
+    return len(_json.loads(user.recovery_codes)) if user.recovery_codes else 0
+
+
+class PendingLogins:
+    """Password accepted, second factor outstanding. Short-lived, in memory
+    (the app runs as a single process)."""
+
+    def __init__(self) -> None:
+        self._items: dict[str, dict] = {}
+
+    def create(self, user_id: int, ip: str) -> str:
+        self._sweep()
+        token = secrets.token_urlsafe(32)
+        self._items[token] = {"user_id": user_id, "ip": ip, "expires": time.monotonic() + MFA_PENDING_TTL_SECONDS, "attempts": 0}
+        return token
+
+    def get(self, token: str) -> dict | None:
+        self._sweep()
+        return self._items.get(token or "")
+
+    def fail(self, token: str) -> None:
+        item = self._items.get(token)
+        if item is None:
+            return
+        item["attempts"] += 1
+        if item["attempts"] >= MFA_MAX_ATTEMPTS:
+            self._items.pop(token, None)
+
+    def consume(self, token: str) -> None:
+        self._items.pop(token, None)
+
+    def _sweep(self) -> None:
+        now = time.monotonic()
+        for k in [k for k, v in self._items.items() if v["expires"] < now]:
+            self._items.pop(k, None)
+
+    def reset(self) -> None:
+        self._items.clear()
+
+
+pending_logins = PendingLogins()

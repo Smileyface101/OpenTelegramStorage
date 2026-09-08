@@ -34,6 +34,12 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     failed_logins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Two-factor (TOTP). Secret is vault-encrypted; recovery codes are stored
+    # as SHA-256 digests (JSON list), each usable once.
+    totp_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    totp_last_counter: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)  # replay guard
+    recovery_codes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 

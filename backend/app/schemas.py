@@ -118,3 +118,17 @@ class ImportRequest(BaseModel):
     mode: str | None = None                            # file | zip | tree
     folder_id: int | None = None
     name: str | None = Field(default=None, max_length=255)
+
+
+class MfaLogin(BaseModel):
+    mfa_token: str = Field(min_length=10, max_length=128)
+    code: str = Field(min_length=4, max_length=32)
+
+
+class TotpCode(BaseModel):
+    code: str = Field(min_length=6, max_length=8)
+
+
+class TotpDisable(BaseModel):
+    password: str
+    code: str = Field(min_length=4, max_length=32)  # TOTP or recovery code

@@ -6,7 +6,7 @@ from app.transfers.verify import verifying as _verifying
 
 def user_out(u: User) -> dict:
     return {"id": u.id, "username": u.username, "role": u.role.value, "is_active": u.is_active,
-            "created_at": u.created_at}
+            "created_at": u.created_at, "totp_enabled": bool(u.totp_enabled)}
 
 
 def folder_out(f: Folder) -> dict:

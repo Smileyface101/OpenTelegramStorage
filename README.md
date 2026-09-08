@@ -102,6 +102,12 @@ For frontend development run `npm run dev` (proxies `/api` to port 8000).
 
 * Passwords are hashed with argon2id. Login is rate limited per IP and an
   account locks for 15 minutes after 5 failures.
+* Optional two-factor login (TOTP, any authenticator app) with ten single-use
+  recovery codes; codes cannot be replayed within their time step, and five
+  wrong codes burn the login attempt. Admins can reset a locked-out user's
+  second factor, which signs that user out everywhere.
+* Every signed-in device is listed in Settings and can be signed out
+  individually or all at once.
 * Sessions are server-side; the cookie is HttpOnly, SameSite=Lax and Secure
   on HTTPS. State-changing requests need a CSRF token (double submit).
 * The bot token, API hash and MTProto session are encrypted with AES-256-GCM
@@ -133,7 +139,6 @@ size); the upload is refused otherwise.
 ## Roadmap
 
 - Optional encryption of parts (AES-GCM) so Telegram never holds readable bytes.
-- TOTP two-factor login and a session list.
 - Expiring share links.
 - User-account (phone) login for 4 GB parts with Telegram Premium.
 
