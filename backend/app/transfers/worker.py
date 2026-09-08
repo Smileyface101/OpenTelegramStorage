@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL = 2.0
 RECONNECT_INTERVAL = 60.0
 CLEANUP_INTERVAL = 10 * 60.0
-SYNC_CATCHUP_INTERVAL = 5 * 60.0
+SYNC_CATCHUP_INTERVAL = 60.0
 SYNC_RECONCILE_INTERVAL = 60 * 60.0
 
 
@@ -118,6 +118,7 @@ class TransferWorker:
         next_cleanup = loop.time() + 60.0
         next_catchup = loop.time() + 15.0
         next_reconcile = loop.time() + SYNC_RECONCILE_INTERVAL
+        handshake_done = False
         while not self._stop.is_set():
             worked = False
             try:
@@ -134,7 +135,12 @@ class TransferWorker:
                     next_cleanup = now + CLEANUP_INTERVAL
                     from app import maintenance
                     await maintenance.cleanup(self.manager)
-                if now >= next_catchup and self.manager.ready():
+                if not handshake_done and self.manager.ready():
+                    handshake_done = True
+                    next_catchup = now + SYNC_CATCHUP_INTERVAL
+                    from app import sync
+                    await sync.startup_handshake(self.manager)
+                elif now >= next_catchup and self.manager.ready():
                     next_catchup = now + SYNC_CATCHUP_INTERVAL
                     from app import sync
                     await sync.catch_up(self.manager)
@@ -271,6 +277,8 @@ class TransferWorker:
             os.remove(staged)
         except FileNotFoundError:
             pass
+        from app import sync as _sync2
+        _sync2.bump()
         if done and file.status == FileStatus.READY:
             logger.info("File %s (%s) is in the channel: %d part(s)", file.id, file.name, total)
 

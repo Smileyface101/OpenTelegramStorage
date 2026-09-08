@@ -49,6 +49,11 @@ async def _own_file(db: AsyncSession, user: User, file_id: str) -> File:
     return f
 
 
+def _bump() -> None:
+    from app import sync
+    sync.bump()
+
+
 def _scope(query, model, user: User, shared: bool):
     return query if shared else query.where(model.owner_id == user.id)
 
@@ -68,6 +73,13 @@ async def _path(db: AsyncSession, folder_id: int | None) -> str | None:
 
 
 # ----------------------------------------------------------------- listing
+@router.get("/files/revision")
+async def files_revision(user: User = Depends(security.current_user)):
+    """Cheap change counter; the UI polls it and reloads the listing when it moves."""
+    from app import sync
+    return {"revision": sync.revision}
+
+
 @router.get("/files")
 async def list_files(folder_id: int | None = None, q: str | None = None,
                      db: AsyncSession = Depends(get_db), user: User = Depends(security.current_user)):
@@ -117,6 +129,7 @@ async def create_folder(data: FolderCreate, db: AsyncSession = Depends(get_db),
     await db.flush()
     await _emit(db, user, "folder_create", path=await _path(db, folder.id))
     await db.commit()
+    _bump()
     return folder_out(folder)
 
 
@@ -182,6 +195,7 @@ async def bulk_move(data: BulkMove, db: AsyncSession = Depends(get_db), user: Us
         f.meta_updated_at = (await _emit(db, user, "move", id=f.id, path=target_path)) or datetime.utcnow()
         moved += 1
     await db.commit()
+    _bump()
     return {"ok": True, "moved": moved}
 
 
@@ -194,6 +208,7 @@ async def move_folder(folder_id: int, data: Move, db: AsyncSession = Depends(get
     await _move_folder(db, user, folder, data.folder_id)
     folder.meta_updated_at = (await _emit(db, user, "folder_move", path=old_path, to=await _path(db, data.folder_id))) or datetime.utcnow()
     await db.commit()
+    _bump()
     return folder_out(folder)
 
 
@@ -228,6 +243,7 @@ async def ensure_folder_path(data: FolderEnsure, db: AsyncSession = Depends(get_
         folder = existing
         parent_id = folder.id
     await db.commit()
+    _bump()
     return folder_out(folder)
 
 
@@ -239,6 +255,7 @@ async def rename_folder(folder_id: int, data: Rename, db: AsyncSession = Depends
     folder.name = FolderCreate(name=data.name).name
     folder.meta_updated_at = (await _emit(db, user, "folder_rename", path=old_path, name=folder.name)) or datetime.utcnow()
     await db.commit()
+    _bump()
     return folder_out(folder)
 
 
@@ -265,6 +282,7 @@ async def delete_folder(folder_id: int, db: AsyncSession = Depends(get_db),
     shared = await _shared(db)
     await db.delete(folder)  # cascades to subfolders and file rows
     await db.commit()
+    _bump()
     if shared and manager.ready():
         from app import sync
         by = await sync.label(db, user.username)
@@ -290,6 +308,7 @@ async def rename_file(file_id: str, data: Rename, db: AsyncSession = Depends(get
     f.name = name
     f.meta_updated_at = (await _emit(db, user, "rename", id=f.id, name=name)) or datetime.utcnow()
     await db.commit()
+    _bump()
     return file_out(f)
 
 
@@ -301,6 +320,7 @@ async def move_file(file_id: str, data: Move, db: AsyncSession = Depends(get_db)
     f.folder_id = data.folder_id
     f.meta_updated_at = (await _emit(db, user, "move", id=f.id, path=await _path(db, data.folder_id))) or datetime.utcnow()
     await db.commit()
+    _bump()
     return file_out(f)
 
 
@@ -352,6 +372,7 @@ async def delete_file(file_id: str, db: AsyncSession = Depends(get_db), user: Us
     shared = await _shared(db)
     await db.delete(f)
     await db.commit()
+    _bump()
     if shared and manager.ready():
         from app import sync
         await sync.announce_delete(manager, file_id, await sync.label(db, user.username))

@@ -47,6 +47,7 @@ async def _clean_tables():
     transfer_worker.progress.active.clear()
     from app import sync as _sync
     _sync._hello_pending.clear(); _sync._last_hello_reply = 0.0
+    _sync.status["server_id"] = None; _sync.status["last_error"] = None
     for leftover in config.STAGING_DIR.glob("*"):
         leftover.unlink()
     yield

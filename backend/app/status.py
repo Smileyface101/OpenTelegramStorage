@@ -6,7 +6,7 @@ from datetime import datetime
 
 from sqlalchemy import func, select
 
-from app import __version__, config, db as _db, maintenance, recovery, settings_store
+from app import __version__, config, db as _db, maintenance, recovery, settings_store, sync
 from app.models import File, FileStatus, Upload, UploadStatus
 from app.transfers import importer
 from app.transfers.worker import progress
@@ -42,6 +42,9 @@ async def snapshot(manager, worker) -> dict:
         stored = await db.scalar(select(func.coalesce(func.sum(File.size), 0)).where(File.status == FileStatus.READY))
         sessions = await db.scalar(select(func.count(Upload.id)).where(Upload.status == UploadStatus.ACTIVE))
         stale_hours = await settings_store.get_int(db, "transfer.stale_upload_hours", 72)
+        ws_mode = (await settings_store.get(db, "workspace.mode")) or "private"
+        ws_name = (await settings_store.get(db, "workspace.name")) or ""
+        ws_last = await settings_store.get_int(db, "workspace.last_message_id", 0)
     st = manager.status
     task = getattr(worker, "_task", None)
     db_size = config.DB_PATH.stat().st_size if config.DB_PATH.exists() else 0
@@ -59,6 +62,7 @@ async def snapshot(manager, worker) -> dict:
         "database": {"path": str(config.DB_PATH), "size_bytes": db_size},
         "import": {"enabled": importer.enabled(), "dir": str(config.IMPORT_DIR), "active": importer.active},
         "recovery": recovery.snapshot(),
+        "sync": {"mode": ws_mode, "name": ws_name, "last_message_id": ws_last, "revision": sync.revision, **sync.status},
         "last_cleanup": maintenance.last_run,
         "recent_errors": list(recent_errors)[-20:][::-1],
     }

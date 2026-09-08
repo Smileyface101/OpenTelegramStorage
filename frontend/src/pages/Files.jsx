@@ -63,6 +63,22 @@ export default function Files({ user }) {
     } catch (e) { setError(e.message) }
   }, [folderId, q])
   useEffect(() => { load(); setSelected({ files: new Set(), folders: new Set() }) }, [load])
+  // Live refresh: the server bumps a revision counter on every index change,
+  // including changes synced from other servers; reload the listing when it moves.
+  const revRef = useRef(null)
+  useEffect(() => {
+    let alive = true
+    const tick = async () => {
+      try {
+        const { revision } = await get('/api/files/revision')
+        if (!alive) return
+        if (revRef.current !== null && revision !== revRef.current) load()
+        revRef.current = revision
+      } catch { /* offline; try again next tick */ }
+    }
+    tick(); const t = setInterval(tick, 3000)
+    return () => { alive = false; clearInterval(t) }
+  }, [load])
   const pending = data?.files.some((f) => f.status !== 'ready' && f.status !== 'failed')  // includes 'syncing' from other servers
   useEffect(() => { if (!pending) return; const t = setInterval(load, 2000); return () => clearInterval(t) }, [pending, load])
   useEffect(() => { try { localStorage.setItem('ots.sort', JSON.stringify(sort)) } catch { /* ignore */ } }, [sort])

@@ -11,6 +11,13 @@ from tests.conftest import stored_plaintext
 from tests.test_transfers import _drain, _upload
 
 
+def _foreign(kind, **fields):
+    """An event as another server would post it (different server id)."""
+    ev = json.loads(sync.make_event(kind, **fields))
+    ev["sid"] = "other0001"
+    return json.dumps(ev)
+
+
 def _other_server_uploads(fm, name, data, part_size, by="laptop/alice", path=None, fid=None):
     """Emulate another server posting a file's parts (unencrypted) with captions."""
     import uuid
@@ -77,7 +84,7 @@ async def test_delete_event_and_reconcile(api, admin, fake_manager):
         await sync.handle_post(mid, json.dumps(cap), size)
     assert (await api.get(f"/api/files/{fid}")).status_code == 200
     # Other server deleted it and posted an event.
-    ev_id = await fake_manager.send_text(sync.make_event("delete", id=fid, by="laptop/alice"))
+    ev_id = await fake_manager.send_text(_foreign("delete", id=fid, by="laptop/alice"))
     await sync.handle_post(ev_id, fake_manager.messages[ev_id][2], None)
     assert (await api.get(f"/api/files/{fid}")).status_code == 404
     # Reconcile: messages vanished without an event (deleted by hand in Telegram).
@@ -103,7 +110,7 @@ async def test_catch_up_after_downtime(api, admin, fake_manager):
     # Posts happened while we were offline: two files and a delete event for one of them.
     fid_a, _ = _other_server_uploads(fake_manager, "a.bin", b"a" * 1500, 1000)
     fid_b, _ = _other_server_uploads(fake_manager, "b.bin", b"b" * 500, 1000)
-    await fake_manager.send_text(sync.make_event("delete", id=fid_a, by="laptop/alice"))
+    await fake_manager.send_text(_foreign("delete", id=fid_a, by="laptop/alice"))
     res = await sync.catch_up(fake_manager)
     assert res["parts"] == 3 and res["events"] >= 1  # the delete, plus our own layout/hello echoes
     names = sorted(x["name"] for x in (await api.get("/api/files")).json()["files"])
@@ -141,9 +148,9 @@ async def test_rename_and_move_events_apply_with_lww(api, admin, fake_manager):
     for mid, cap, size in ids:
         await sync.handle_post(mid, json.dumps(cap), size)
     # Rename + move from the other server.
-    for ev in [sync.make_event("rename", id=fid, name="final.txt", by="laptop/alice"),
-               sync.make_event("folder_create", path="Archive/2026", by="laptop/alice"),
-               sync.make_event("move", id=fid, path="Archive/2026", by="laptop/alice")]:
+    for ev in [_foreign("rename", id=fid, name="final.txt", by="laptop/alice"),
+               _foreign("folder_create", path="Archive/2026", by="laptop/alice"),
+               _foreign("move", id=fid, path="Archive/2026", by="laptop/alice")]:
         mid = await fake_manager.send_text(ev)
         await sync.handle_post(mid, ev, None)
     f = (await api.get(f"/api/files/{fid}")).json()
@@ -153,20 +160,20 @@ async def test_rename_and_move_events_apply_with_lww(api, admin, fake_manager):
     inside = (await api.get("/api/files", params={"folder_id": tree[1]["id"]})).json()
     assert [x["name"] for x in inside["files"]] == ["final.txt"]
     # An OLDER event must not undo the newer rename (last writer wins).
-    old = json.loads(sync.make_event("rename", id=fid, name="stale.txt")); old["ts"] = "2000-01-01T00:00:00"
+    old = json.loads(_foreign("rename", id=fid, name="stale.txt")); old["ts"] = "2000-01-01T00:00:00"
     mid = await fake_manager.send_text(json.dumps(old)); await sync.handle_post(mid, json.dumps(old), None)
     assert (await api.get(f"/api/files/{fid}")).json()["name"] == "final.txt"
     # Folder rename/move from the other server.
-    for ev in [sync.make_event("folder_rename", path="Archive/2026", name="Y2026", by="laptop/alice"),
-               sync.make_event("folder_move", path="Archive/Y2026", to="Docs", by="laptop/alice")]:
+    for ev in [_foreign("folder_rename", path="Archive/2026", name="Y2026", by="laptop/alice"),
+               _foreign("folder_move", path="Archive/Y2026", to="Docs", by="laptop/alice")]:
         mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
     tree = (await api.get("/api/folders/tree")).json()
     assert [(t["name"], t["depth"]) for t in tree] == [("Archive", 0), ("Docs", 0), ("Y2026", 1)]
     # Deleting a folder that still has files is refused until its files are gone.
-    ev = sync.make_event("folder_delete", path="Docs/Y2026"); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
+    ev = _foreign("folder_delete", path="Docs/Y2026"); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
     assert any(t["name"] == "Y2026" for t in (await api.get("/api/folders/tree")).json())
-    ev = sync.make_event("delete", id=fid); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
-    ev = sync.make_event("folder_delete", path="Docs/Y2026"); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
+    ev = _foreign("delete", id=fid); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
+    ev = _foreign("folder_delete", path="Docs/Y2026"); mid = await fake_manager.send_text(ev); await sync.handle_post(mid, ev, None)
     assert not any(t["name"] == "Y2026" for t in (await api.get("/api/folders/tree")).json())
 
 
@@ -226,6 +233,7 @@ async def test_layout_publish_and_apply(api, admin, fake_manager):
     g = (await api.get(f"/api/files/{f['id']}")).json()
     assert g["name"] == "orig.txt" and g["folder_id"] is None
     for e in evs[:2]:  # tree + place (the hello would make us publish in turn)
+        e = {**e, "sid": "other0001"}  # as if posted by the other server
         m = await fake_manager.send_text(json.dumps(e)); await sync.handle_post(m, json.dumps(e), None)
     g = (await api.get(f"/api/files/{f['id']}")).json()
     tree = (await api.get("/api/folders/tree")).json()
@@ -233,5 +241,36 @@ async def test_layout_publish_and_apply(api, admin, fake_manager):
     assert g["name"] == "final.txt" and g["folder_id"] == next(t["id"] for t in tree if t["name"] == "2026")
     # A hello from another server queues a layout publication for the worker.
     assert sync.take_hello_request() is False
-    hello = sync.make_event("hello", by="laptop/system"); m = await fake_manager.send_text(hello); await sync.handle_post(m, hello, None)
+    hello = _foreign("hello", by="laptop/system"); m = await fake_manager.send_text(hello); await sync.handle_post(m, hello, None)
     assert sync.take_hello_request() is True
+
+
+async def test_server_id_makes_echo_detection_name_independent(api, admin, fake_manager):
+    await api.put("/api/admin/settings", json={"workspace_mode": "shared", "workspace_name": "Linux"})
+    f = (await _upload(api, "x.txt", b"x" * 10))["file"]
+    await _drain(transfer_worker.worker)
+    since = set(fake_manager.messages)
+    await api.patch(f"/api/files/{f['id']}", json={"name": "y.txt"})
+    ev = _events(fake_manager, since)[0]
+    assert ev["sid"] == sync.status["server_id"] and ev["by"] == "Linux/admin"
+    # Same name on the other server no longer hides its events: a rename with a
+    # different sid but the same name prefix is applied.
+    foreign = json.loads(sync.make_event("rename", id=f["id"], name="from-other.txt", by="Linux/bob")); foreign["sid"] = "deadbeef"
+    m = await fake_manager.send_text(json.dumps(foreign)); await sync.handle_post(m, json.dumps(foreign), None)
+    assert (await api.get(f"/api/files/{f['id']}")).json()["name"] == "from-other.txt"
+    # Our own echo (same sid) is ignored even after a newer local change.
+    m = await fake_manager.send_text(json.dumps(ev)); await sync.handle_post(m, json.dumps(ev), None)
+    assert (await api.get(f"/api/files/{f['id']}")).json()["name"] == "from-other.txt"
+
+
+async def test_revision_and_startup_handshake(api, admin, fake_manager):
+    r0 = (await api.get("/api/files/revision")).json()["revision"]
+    await api.post("/api/folders", json={"name": "A"})
+    assert (await api.get("/api/files/revision")).json()["revision"] > r0
+    await api.put("/api/admin/settings", json={"workspace_mode": "shared", "workspace_name": "home"})
+    before = set(fake_manager.messages)
+    await sync.startup_handshake(fake_manager)
+    kinds = [e["t"] for e in _events(fake_manager, before)]
+    assert "hello" in kinds and "tree" in kinds
+    st = (await api.get("/api/admin/status")).json()["sync"]
+    assert st["mode"] == "shared" and st["server_id"] and st["last_catchup_at"]

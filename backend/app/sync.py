@@ -32,6 +32,29 @@ _last_hello_reply = 0.0
 
 _hello_pending: list = []   # set by apply_event("hello"); drained by the worker loop
 
+# Anything that changes the index bumps this; the UI polls it to refresh.
+revision = 0
+status = {"last_live_at": None, "last_live_kind": None, "last_catchup_at": None, "last_catchup": None,
+          "last_reconcile_at": None, "events_applied": 0, "parts_indexed": 0, "last_error": None, "server_id": None}
+
+
+def bump() -> None:
+    global revision
+    revision += 1
+
+
+async def server_id(db) -> str:
+    """Stable random id for this server; carried in events so a server can
+    recognise its own echoes regardless of how it is named."""
+    sid = await settings_store.get(db, "workspace.server_id")
+    if not sid:
+        import secrets
+        sid = secrets.token_hex(4)
+        await settings_store.set(db, "workspace.server_id", sid)
+        await db.commit()
+    status["server_id"] = sid
+    return sid
+
 
 def take_hello_request() -> bool:
     if _hello_pending:
@@ -42,6 +65,8 @@ def take_hello_request() -> bool:
 
 def make_event(kind: str, **fields) -> str:
     ev = {EVENT_KEY: 1, "t": kind, "ts": datetime.utcnow().isoformat(), **fields}
+    if status.get("server_id") and "sid" not in ev:
+        ev["sid"] = status["server_id"]
     return json.dumps(ev, separators=(",", ":"))
 
 
@@ -177,8 +202,11 @@ async def resolve_path(db, path: str | None) -> Folder | None:
 
 
 async def is_own(db, ev: dict) -> bool:
-    """Our own events come back to us through the channel. Server names must
-    be unique in a workspace; the wizard says so."""
+    """Our own events come back to us through the channel. Matched by the
+    random server id when present (0.1.2+), else by server name."""
+    sid = status.get("server_id") or await server_id(db)
+    if ev.get("sid"):
+        return ev["sid"] == sid
     name = (await settings_store.get(db, "workspace.name")) or ""
     by = str(ev.get("by") or "")
     return bool(name) and by.startswith(name + "/")
@@ -288,14 +316,23 @@ async def handle_post(message_id: int, text: str, doc_size: int | None) -> None:
         cap = parse_caption(text) if doc_size is not None else None
         ev = parse_event(text) if cap is None else None
         try:
+            changed = False
             if cap is not None:
-                await index_part(db, message_id, cap, doc_size)
+                changed = await index_part(db, message_id, cap, doc_size)
+                status["parts_indexed"] += 1 if changed else 0
+                status["last_live_kind"] = "part"
             elif ev is not None:
-                await apply_event(db, ev)
+                changed = await apply_event(db, ev)
+                status["events_applied"] += 1 if changed else 0
+                status["last_live_kind"] = ev.get("t")
+            status["last_live_at"] = datetime.utcnow().isoformat()
             await _bump_last_seen(db, message_id)
             await db.commit()
-        except Exception:  # noqa: BLE001
+            if changed:
+                bump()
+        except Exception as e:  # noqa: BLE001
             await db.rollback()
+            status["last_error"] = f"live message {message_id}: {e}"[:300]
             logger.exception("sync: failed to apply message %s", message_id)
 
 
@@ -317,14 +354,23 @@ async def catch_up(manager) -> dict:
             for m in msgs:
                 cap = parse_caption(m["caption"]) if m.get("size") is not None else None
                 ev = parse_event(m["caption"]) if cap is None else None
-                if cap is not None:
-                    await index_part(db, m["id"], cap, m["size"]); summary["parts"] += 1
-                elif ev is not None:
-                    await apply_event(db, ev); summary["events"] += 1
+                try:
+                    if cap is not None:
+                        if await index_part(db, m["id"], cap, m["size"]):
+                            summary["parts"] += 1
+                    elif ev is not None:
+                        if await apply_event(db, ev):
+                            summary["events"] += 1
+                except Exception as e:  # noqa: BLE001
+                    status["last_error"] = f"catch-up message {m['id']}: {e}"[:300]
+                    logger.exception("sync: catch-up failed on message %s", m["id"])
             await settings_store.set(db, "workspace.last_message_id", str(ids[-1]))
             await db.commit()
+    status["last_catchup_at"] = datetime.utcnow().isoformat()
+    status["last_catchup"] = summary
     if summary["parts"] or summary["events"]:
         logger.info("sync catch-up: %s", summary)
+        bump()
     return summary
 
 
@@ -347,6 +393,7 @@ async def reconcile(manager) -> dict:
             for mid in batch:
                 if mid not in present:
                     gone.add(by_msg[mid])
+        status["last_reconcile_at"] = datetime.utcnow().isoformat()
         for fid in gone:
             f = await db.get(File, fid, options=[selectinload(File.parts)])
             if f is None or f.status in (FileStatus.RECEIVING, FileStatus.QUEUED, FileStatus.UPLOADING, FileStatus.HASHING):
@@ -357,6 +404,8 @@ async def reconcile(manager) -> dict:
             summary["removed"] += 1
             logger.info("sync reconcile: %s (%s) no longer in the channel; removed", fid, f.name)
         await db.commit()
+        if summary["removed"]:
+            bump()
     return summary
 
 
@@ -376,6 +425,7 @@ async def announce_delete(manager, file_id: str, by: str | None) -> None:
 
 
 async def label(db, username: str) -> str:
+    await server_id(db)  # make sure every event we emit carries our id
     name = (await settings_store.get(db, "workspace.name")) or "server"
     return f"{name}/{username}"[:120]
 
@@ -437,3 +487,20 @@ async def say_hello(manager, by: str | None) -> None:
         await manager.send_text(make_event("hello", by=by))
     except Exception as e:  # noqa: BLE001
         logger.warning("sync: hello failed: %s", e)
+
+
+async def startup_handshake(manager) -> None:
+    """Shared server coming online: catch up on what we missed, then ask the
+    others for their layout and offer ours. Fully automatic; no buttons."""
+    async with _db.async_session() as db:
+        if not await settings_store.shared_mode(db):
+            return
+        await server_id(db)
+        name = (await settings_store.get(db, "workspace.name")) or "server"
+    try:
+        await catch_up(manager)
+        await say_hello(manager, f"{name}/system")
+        await publish_layout(manager, f"{name}/system")
+    except Exception as e:  # noqa: BLE001
+        status["last_error"] = f"startup handshake: {e}"[:300]
+        logger.warning("sync: startup handshake failed: %s", e)

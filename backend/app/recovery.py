@@ -168,6 +168,8 @@ async def _rebuild(manager, owner_id: int, part_size_default: int) -> None:
                 state.files_incomplete += 1
             state.note(f"{'Imported' if complete else 'Incomplete'}: {meta['name']} ({len(parts)}/{total} parts)")
         await db.commit()
+    from app import sync
+    sync.bump()
 
 
 def snapshot() -> dict:

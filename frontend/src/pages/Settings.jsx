@@ -149,6 +149,14 @@ function SystemSection({ onChange }) {
         <span className="text-xs text-ink-400 self-center">{st.last_cleanup ? `Last cleanup ${when(st.last_cleanup.at)}: ${st.last_cleanup.stale_uploads + st.last_cleanup.stale_bundles + st.last_cleanup.stale_receiving_files} stale, ${st.last_cleanup.orphan_files_removed} orphan file(s), ${bytes(st.last_cleanup.orphan_bytes_freed)} freed` : 'Cleanup has not run yet'}</span>
       </div>
       {st.import.enabled ? <p className="text-xs text-ink-400">Import directory: {st.import.dir}</p> : <p className="text-xs text-ink-400">No import directory mounted ({st.import.dir}).</p>}
+      {st.sync?.mode === 'shared' && (
+        <div className="rounded-lg border border-ink-800 bg-ink-950/40 p-3 text-xs space-y-1">
+          <div className="text-[11px] uppercase tracking-wide text-ink-400">Shared workspace sync · server "{st.sync.name}" · id {st.sync.server_id || '…'}</div>
+          <div>Last live message: {st.sync.last_live_at ? `${when(st.sync.last_live_at)} (${st.sync.last_live_kind})` : 'none yet'} · parts indexed {st.sync.parts_indexed} · events applied {st.sync.events_applied}</div>
+          <div>Last catch-up: {st.sync.last_catchup_at ? `${when(st.sync.last_catchup_at)} — scanned ${st.sync.last_catchup?.scanned ?? 0}, ${st.sync.last_catchup?.parts ?? 0} part(s), ${st.sync.last_catchup?.events ?? 0} event(s)` : 'not yet'} · up to message #{st.sync.last_message_id}</div>
+          {st.sync.last_error && <div className="text-red-300">Last sync error: {st.sync.last_error}</div>}
+        </div>
+      )}
       <details>
         <summary className="cursor-pointer text-sm text-ink-300">Recent warnings and errors ({st.recent_errors.length})</summary>
         {st.recent_errors.length === 0 ? <div className="text-xs text-ink-400 mt-2">None since start.</div> : (
@@ -476,7 +484,7 @@ function WorkspaceSection() {
           <p className="text-xs text-ink-400 mt-1">Shown as "name/username" next to files uploaded from here. Must be different on every server that shares the channel.</p></div>
         <Alert>{error}</Alert><Alert kind="ok">{msg}</Alert>
         <div className="flex flex-wrap gap-2"><button className="btn-primary">Save</button>{shared && <button type="button" className="btn-ghost" disabled={busy} onClick={syncNow}>{busy ? 'Working…' : 'Sync with channel now'}</button>}{shared && <button type="button" className="btn-ghost" disabled={busy} onClick={publish}>Publish folder layout</button>}</div>
-        {shared && <p className="text-xs text-ink-400">Folders and file placements made before this server was shared are not in the channel captions. "Publish folder layout" posts the current tree and every file's location and name so other servers match it; switching to Shared does this once automatically, and a server that joins or rebuilds asks for it.</p>}
+        {shared && <p className="text-xs text-ink-400">Sync is automatic: on start and every minute this server catches up with the channel, listens live, and exchanges folder layouts with the others. The buttons only force it now. The System panel above shows what the last sync did.</p>}
       </form>
     </Section>
   )
